@@ -72,6 +72,7 @@ import {
   TRANSACTION_CATEGORY,
   isTransactionCategory,
   normalizeTransactionCategory,
+  SpendingPolicySchema,
   type SpendingPolicy,
   type Transaction,
 } from "../shared/types.ts";
@@ -730,58 +731,8 @@ type PaymentCategory =
   | typeof TRANSACTION_CATEGORY.MEDICATIONS
   | typeof TRANSACTION_CATEGORY.BILLS;
 
-// Zod schema for spending policy — enforces positive values, sane upper bounds,
-// and cross-field ordering. holdTimeSeconds uses .min(0) because DEFAULT_POLICY sets it to 0.
-export const SpendingPolicySchema = z
-  .object({
-    dailyLimit: z
-      .number()
-      .gt(0, "dailyLimit must be greater than 0")
-      .max(10_000, "dailyLimit cannot exceed $10,000"),
-    monthlyLimit: z
-      .number()
-      .gt(0, "monthlyLimit must be greater than 0")
-      .max(100_000, "monthlyLimit cannot exceed $100,000"),
-    medicationMonthlyBudget: z
-      .number()
-      .gt(0, "medicationMonthlyBudget must be greater than 0")
-      .max(50_000, "medicationMonthlyBudget cannot exceed $50,000"),
-    billMonthlyBudget: z
-      .number()
-      .gt(0, "billMonthlyBudget must be greater than 0")
-      .max(50_000, "billMonthlyBudget cannot exceed $50,000"),
-    approvalThreshold: z
-      .number()
-      .gt(0, "approvalThreshold must be greater than 0")
-      .max(10_000, "approvalThreshold cannot exceed $10,000"),
-    holdTimeSeconds: z.number().min(0).max(86_400).default(0),
-    timezone: z.string().optional(),
-    toolFees: z.record(z.string(), z.number().min(0)).optional(),
-    notifications: z
-      .object({
-        email: z.boolean(),
-        sms: z.boolean(),
-        emailAddress: z.email().optional(),
-        phoneNumber: z.string().optional(),
-      })
-      .optional(),
-  })
-  .refine((p) => p.dailyLimit <= p.monthlyLimit, {
-    message: "dailyLimit cannot exceed monthlyLimit",
-    path: ["dailyLimit"],
-  })
-  .refine((p) => p.approvalThreshold <= p.dailyLimit, {
-    message: "approvalThreshold cannot exceed dailyLimit",
-    path: ["approvalThreshold"],
-  })
-  .refine(
-    (p) => p.medicationMonthlyBudget + p.billMonthlyBudget <= p.monthlyLimit,
-    {
-      message:
-        "medicationMonthlyBudget + billMonthlyBudget cannot exceed monthlyLimit",
-      path: ["medicationMonthlyBudget"],
-    },
-  );
+// Re-export canonical SpendingPolicySchema from shared/types.ts as single source of truth (Issue #1066)
+export { SpendingPolicySchema };
 
 type SpendingPolicyInput = z.input<typeof SpendingPolicySchema>;
 
@@ -1297,7 +1248,7 @@ export function setSpendingPolicy(
   if (!policy) {
     throw new Error("Spending policy required");
   }
-  const normalizedPolicy: SpendingPolicy = {
+  const rawMerged = {
     ...DEFAULT_POLICY,
     ...policy,
     notifications: {
@@ -1307,7 +1258,7 @@ export function setSpendingPolicy(
       sms: policy.notifications?.sms ?? false,
     },
   };
-  assertValidSpendingPolicy(normalizedPolicy);
+  const normalizedPolicy: SpendingPolicy = SpendingPolicySchema.parse(rawMerged);
   const previous = currentPolicy;
   currentPolicy = normalizedPolicy;
   savePolicy(normalizedPolicy);

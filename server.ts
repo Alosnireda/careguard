@@ -106,6 +106,7 @@ import {
   PRICING_DATABASE,
   getPharmacyPrices,
   getAvailableDrugs,
+  DEFAULT_ZIP_CODE,
 } from "./shared/pharmacy-pricing.ts";
 import { createCareRecipientsStore } from "./services/care-recipients/db.ts";
 import { createCareRecipientsRouter } from "./services/care-recipients/routes.ts";
@@ -618,6 +619,9 @@ app.get(
       drug: req.query.drug,
       dosage: req.query.dosage,
       zip: req.query.zip,
+      recipient: req.query.recipient,
+      recipient_id: req.query.recipient_id,
+      recipientId: req.query.recipientId,
     });
     if (!parsedQuery.success) {
       res.status(400).json({
@@ -630,13 +634,18 @@ app.get(
 
     const query = parsedQuery.data as PharmacyCompareQuery;
     const drug = query.drug.trim().toLowerCase();
-    const dosage = resolveRequestedDosage(drug, query.dosage);
+    const recipient =
+      query.recipient ||
+      query.recipient_id ||
+      query.recipientId ||
+      (req.headers["x-recipient-id"] as string | undefined);
+    const dosage = resolveRequestedDosage(drug, query.dosage, recipient);
 
     try {
-      const { prices, usedZipCode, isFallbackZip } = getPharmacyPrices(
-        drug,
-        query.zip,
-      );
+      const prices = pharmacyStore.getPrices(drug);
+      const isFallbackZip = Boolean(query.zip && query.zip !== DEFAULT_ZIP_CODE);
+      const usedZipCode = isFallbackZip ? DEFAULT_ZIP_CODE : (query.zip || DEFAULT_ZIP_CODE);
+
       res.json(
         buildCompareResponse({
           drug,

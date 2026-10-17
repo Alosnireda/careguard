@@ -7,7 +7,7 @@ import { logger } from '../../shared/logger.ts';
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
 
-export interface CareRecipientEntity {
+export interface CareRecipientRecord {
   id: string;
   name: string;
   age: number | null;
@@ -16,6 +16,9 @@ export interface CareRecipientEntity {
   insurance: string | null;
   caregiver_user_id: string | null;
 }
+
+/** Backward-compatibility alias for CareRecipientRecord (Issue #1067) */
+export type CareRecipientEntity = CareRecipientRecord;
 
 interface CareRecipientRow {
   id: string;

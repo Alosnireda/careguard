@@ -484,7 +484,8 @@ describe("GET /pharmacy/compare", () => {
     const res = await request(app).get("/pharmacy/compare").query({ drug: "lisinopril", zip: "94105" });
     expect(res.status).toBe(200);
     expect(res.body.zipCode).toBe("94105");
-    expect(res.body.usedZipCode).toBe(true);
+    expect(res.body.isFallbackZip).toBe(true);
+    expect(res.body.usedZipCode).toBe("90210");
   });
 
   it("uses default zip 90210 when zip param is omitted", async () => {
