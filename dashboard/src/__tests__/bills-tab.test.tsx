@@ -205,3 +205,18 @@ describe("BillsTab — dispute generation feedback (Issue #1256)", () => {
     expect(toastSuccess).toHaveBeenCalledWith("Dispute letter PDF downloaded");
   });
 });
+
+describe("BillsTab — empty state (Issue #1240)", () => {
+  it("explains the benefit and links to the audit action", () => {
+    render(<BillsTab agentResult={null} recipient={recipient} />);
+    expect(screen.getByText(/catch overcharges and billing errors before you pay/i)).toBeTruthy();
+    const link = screen.getByRole("link", { name: /Audit a hospital bill/i });
+    expect(link.getAttribute("href")).toBe("?tab=overview");
+    expect(screen.queryByText(/No bills audited yet/i)).toBeNull();
+  });
+
+  it("renders the Spanish copy", () => {
+    render(<BillsTab agentResult={null} recipient={recipient} locale="es" />);
+    expect(screen.getByRole("link", { name: /Auditar una factura del hospital/i })).toBeTruthy();
+  });
+});

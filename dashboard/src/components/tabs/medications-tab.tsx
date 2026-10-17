@@ -7,10 +7,12 @@ import {
   DrugInteractionResultSchema,
   PharmacyCompareResultSchema,
   type RecipientProfile,
+  type Vital,
   type RecipientAllergy,
   type AllergySeverity,
 } from "../../lib/types";
 import type { AgentResult } from "../types";
+import { VitalsSection } from "../vitals-section";
 import { getTranslations, type Locale } from "../../i18n";
 import { AGENT_URL } from "../../lib/agent-url";
 import { agentFetch } from "../../lib/agent-fetch";
@@ -25,6 +27,7 @@ export interface MedicationsTabProps {
 
 export function MedicationsTab({ agentResult, recipient, locale = "en" }: MedicationsTabProps) {
   const t = getTranslations(locale).medications;
+  const [vitals, setVitals] = useState<Vital[]>([]);
   const hasPriceResults = agentResult?.toolCalls.some(
     (tc) => tc.tool === "compare_pharmacy_prices",
   );
@@ -205,7 +208,7 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
                         : undefined,
                       allergies,
                     },
-                    { recipient },
+                    { recipient, vitals },
                   );
                 } catch {
                   toast.error("Couldn't parse medication result — try again");
@@ -276,6 +279,7 @@ export function MedicationsTab({ agentResult, recipient, locale = "en" }: Medica
           })}
         </div>
       </div>
+      <VitalsSection locale={locale} onVitalsChange={setVitals} />
 
       {/* ── Documented Allergies & Adverse Reactions (Issue #1230) ─────────── */}
       <div className="bg-white rounded-xl border border-slate-200 p-6">

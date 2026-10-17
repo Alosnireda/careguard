@@ -107,6 +107,40 @@ describe("OverviewTab Component", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows muted placeholder cards before any task has run (#1239)", () => {
+    const { container } = render(
+      <OverviewTab {...mockProps} spending={{ ...mockProps.spending, spending: { ...mockProps.spending.spending, serviceFees: 0 }, transactionCount: 0 }} />,
+    );
+    expect(screen.getByText("Run a task to see savings")).toBeInTheDocument();
+    expect(screen.getByText("Run a bill audit to see errors caught")).toBeInTheDocument();
+    expect(screen.queryByText("$0.00/mo")).not.toBeInTheDocument();
+    // Savings, billing errors, API costs and LLM tokens are all pending.
+    expect(container.querySelectorAll('[data-pending="true"]')).toHaveLength(4);
+  });
+
+  it("keeps showing real API costs before a run when queries were already paid for (#1239)", () => {
+    render(<OverviewTab {...mockProps} />);
+    expect(screen.getByText("5 queries via x402")).toBeInTheDocument();
+    expect(screen.queryByText("Run a task to see agent costs")).toBeTruthy(); // LLM tokens card only
+  });
+
+  it("renders a genuine $0 result with the normal card style after a run (#1239)", () => {
+    const { container } = render(
+      <OverviewTab
+        {...mockProps}
+        agentResult={{
+          response: "No savings found.",
+          spending: { spending: { serviceFees: 0 } } as any,
+          toolCalls: [{ tool: "compare_pharmacy_prices", input: {}, result: { potentialSavings: 0 } }],
+        }}
+      />,
+    );
+    expect(screen.getByText("$0.00/mo")).toBeInTheDocument();
+    expect(screen.getByText("by switching pharmacies")).toBeInTheDocument();
+    expect(screen.queryByText("Run a task to see savings")).not.toBeInTheDocument();
+    expect(container.querySelectorAll('[data-pending="true"]')).toHaveLength(0);
+  });
+
   it("calls onRunTask when task buttons are clicked", () => {
     render(<OverviewTab {...mockProps} />);
 

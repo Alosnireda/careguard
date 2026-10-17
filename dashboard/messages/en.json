@@ -33,7 +33,11 @@
     "limit": "limit",
     "bySwitching": "by switching pharmacies",
     "inOvercharges": "in overcharges identified",
-    "queries": "queries via x402"
+    "queries": "queries via x402",
+    "notRunYet": "Not run yet",
+    "runForSavings": "Run a task to see savings",
+    "runForBillingErrors": "Run a bill audit to see errors caught",
+    "runForApiCosts": "Run a task to see agent costs"
   },
   "budget": {
     "medications": "Medications",
@@ -77,7 +81,9 @@
     "showAll": "Show all items",
     "sortByOvercharge": "Sort by overcharge",
     "sortDefault": "Default order",
-    "notAudited": "No bills audited yet. Run \"Audit Hospital Bill\" from Overview."
+    "notAudited": "CareGuard checks hospital bills line by line to catch overcharges and billing errors before you pay.",
+    "runAudit": "Audit a hospital bill",
+    "runAuditHint": "Takes about a minute — runs from the Overview tab."
   },
   "policy": {
     "title": "Spending Policy for Rosa",
@@ -165,5 +171,28 @@
     "loading": "Loading...",
     "error": "Error",
     "retry": "Try Again"
+  },
+  "vitals": {
+    "title": "Vitals",
+    "description": "Log readings to see how they track against doses taken or missed.",
+    "typeLabel": "Vital type",
+    "weight": "Weight",
+    "bloodPressure": "Blood pressure",
+    "glucose": "Glucose",
+    "systolic": "Systolic",
+    "diastolic": "Diastolic",
+    "log": "Log reading",
+    "invalid": "Enter a positive number for each reading.",
+    "saveFailed": "Couldn't save the reading — try again.",
+    "empty": "No readings logged yet for this vital.",
+    "recent": "Recent readings",
+    "date": "Date",
+    "reading": "Reading",
+    "doseTaken": "Dose taken",
+    "doseMissed": "Dose missed",
+    "dosePending": "Dose due",
+    "trendAria": "trend",
+    "readings": "readings",
+    "adherenceEvents": "adherence events"
   }
 }

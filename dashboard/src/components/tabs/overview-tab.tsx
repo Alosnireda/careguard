@@ -114,11 +114,15 @@ export function OverviewTab({
         (t) => t.tool === "audit_medical_bill" || t.tool === "fetch_and_audit_bill",
       )
       .reduce((s, t) => s + (t.result?.totalOvercharge || 0), 0)
-        .filter(
-          (t) => t.tool === "audit_medical_bill" || t.tool === "fetch_and_audit_bill",
-        )
-        .reduce((s, t) => s + (t.result?.totalOvercharge || 0), 0)
     : 0;
+
+  // #1239: before any task has run there is no result to show — distinguish
+  // that from a run that genuinely found $0. API costs also come from the
+  // persisted spending tracker, so only treat them as pending when nothing
+  // has been spent on queries either.
+  const hasRun = agentResult !== null;
+  const apiCostsPending =
+    !hasRun && !spending?.spending.serviceFees && !spending?.transactionCount;
 
   const llmTokens = agentResult?.llmUsage
     ? agentResult.llmUsage.promptTokens + agentResult.llmUsage.completionTokens
@@ -146,27 +150,31 @@ export function OverviewTab({
         />
         <Card
           label={t.overview.savingsFound}
-          value={agentResult ? `${formatCurrency(savings, locale)}/mo` : `${formatCurrency(0, locale)}/mo`}
-          sub={t.overview.bySwitching}
+          value={hasRun ? `${formatCurrency(savings, locale)}/mo` : t.overview.notRunYet}
+          sub={hasRun ? t.overview.bySwitching : t.overview.runForSavings}
           color="green"
+          pending={!hasRun}
         />
         <Card
           label={t.overview.billingErrors}
-          value={agentResult ? formatCurrency(overcharges, locale) : formatCurrency(0, locale)}
-          sub={t.overview.inOvercharges}
+          value={hasRun ? formatCurrency(overcharges, locale) : t.overview.notRunYet}
+          sub={hasRun ? t.overview.inOvercharges : t.overview.runForBillingErrors}
           color="amber"
+          pending={!hasRun}
         />
         <Card
           label={t.overview.agentApiCosts}
-          value={formatCurrency(spending?.spending.serviceFees ?? 0, locale, 2)}
-          sub={`${spending?.transactionCount ? formatNumber(spending.transactionCount, locale) : 0} ${t.overview.queries}`}
+          value={apiCostsPending ? t.overview.notRunYet : formatCurrency(spending?.spending.serviceFees ?? 0, locale, 2)}
+          sub={apiCostsPending ? t.overview.runForApiCosts : `${spending?.transactionCount ? formatNumber(spending.transactionCount, locale) : 0} ${t.overview.queries}`}
           color="slate"
+          pending={apiCostsPending}
         />
         <Card
           label="LLM Tokens"
-          value={agentResult ? `${formatNumber(llmTokens, locale)} tokens` : "0 tokens"}
-          sub={`≈ ${formatCurrency(Number(llmCost), locale, 4)} this run`}
+          value={hasRun ? `${formatNumber(llmTokens, locale)} tokens` : t.overview.notRunYet}
+          sub={hasRun ? `≈ ${formatCurrency(Number(llmCost), locale, 4)} this run` : t.overview.runForApiCosts}
           color="sky"
+          pending={!hasRun}
         />
       </div>
 

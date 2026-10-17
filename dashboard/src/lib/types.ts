@@ -134,6 +134,48 @@ export type DisputeLetter = {
   generatedAt: string;
 };
 
+// ── Vitals (#1237) ────────────────────────────────────────────────────────────
+
+export const VITAL_TYPES = ["weight", "blood_pressure", "glucose"] as const;
+export type VitalType = (typeof VITAL_TYPES)[number];
+
+/** Default unit per vital type — mirrors services/vitals/db.ts. */
+export const VITAL_DEFAULT_UNIT: Record<VitalType, string> = {
+  weight: "lb",
+  blood_pressure: "mmHg",
+  glucose: "mg/dL",
+};
+
+export const VitalSchema = z.object({
+  id: z.string(),
+  recipient_id: z.string(),
+  type: z.enum(VITAL_TYPES),
+  value: z.number(),
+  secondary_value: z.number().nullable(),
+  unit: z.string(),
+  timestamp: z.string(),
+});
+
+export type Vital = z.infer<typeof VitalSchema>;
+
+export const AdherenceTimelineEventSchema = z.object({
+  id: z.string(),
+  drug: z.string(),
+  date: z.string(),
+  status: z.enum(["pending", "confirmed", "skipped", "flagged"]),
+});
+
+export type AdherenceTimelineEvent = z.infer<typeof AdherenceTimelineEventSchema>;
+
+/** Human-readable reading, e.g. "128/82 mmHg" or "162 lb". */
+export function formatVital(v: Pick<Vital, "type" | "value" | "secondary_value" | "unit">): string {
+  const reading =
+    v.type === "blood_pressure" && v.secondary_value != null
+      ? `${v.value}/${v.secondary_value}`
+      : `${v.value}`;
+  return `${reading} ${v.unit}`;
+}
+
 // ── Allergies & Adverse Reactions (Issue #1230) ────────────────────────────────
 
 export const AllergySeveritySchema = z.enum([

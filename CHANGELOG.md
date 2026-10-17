@@ -6,7 +6,14 @@ This file is auto-updated by the release workflow on each `v*` tag push.
 
 ## [Unreleased]
 
+### Added
+- **dashboard/agent:** #1237 Basic vitals tracking (weight, blood pressure, glucose). New `vitals` table and `/agent/vitals` routes (`services/vitals/`), `GET /agent/adherence/timeline`, a Medications-tab entry form with a trend chart showing adherence markers, and logged vitals included in the medication PDF export.
+- **dashboard/agent:** #1238 Spending-policy changes now show an old-vs-new preview with the impact on recent payments before saving. `check_spending_policy` logic is shared through `evaluateSpendingPolicy`/`simulatePolicyImpact` in `agent/tools.ts`, exposed as `POST /agent/policy/preview`.
+
 ### Fixed
+- **dashboard:** #1239 Overview stat cards use a muted, dashed style with "Run a task to see…" prompts before any task has run, instead of a bare $0.00; a genuine zero after a run keeps the normal style.
+- **dashboard:** #1240 Bills empty state now explains the benefit (catching billing errors), adds an icon, and links to the audit action.
+- **dashboard/agent:** fixed parse errors on main in `medications-tab.tsx` (missing brace) and `agent/server.ts` (duplicated `runAgent` options block from a merge).
 - **dashboard:** #1276 Settings tab now warns before discarding unsaved edits. Added confirmation dialog and beforeunload handler when caregiver navigates away mid-edit, plus prominent warning banner during edit mode.
 - **dashboard:** #1270 Policy limit fields now show real-world helper text. Added context-specific guidance below Daily Spending Limit, Monthly Spending Limit, Medication/Bill Budget, and Approval Threshold to help caregivers set sensible values.
 - **dashboard:** #1267 Agent Response card now renders with better structure. Detects and formats numbered lists, adds 'Show more' truncation for long responses (>500 chars), keeping raw text accessible if parsing fails.

@@ -97,6 +97,7 @@ import {
   getSpendingTracker,
   resetSpendingTracker,
   SpendingPolicySchema,
+  previewSpendingPolicy,
 } from "./agent/tools.ts";
 import { executeTool, runAgent } from "./agent/runner.ts";
 import { resolveRequestedDosage } from "./services/pharmacy-api/dosage.ts";
@@ -108,6 +109,8 @@ import {
 } from "./shared/pharmacy-pricing.ts";
 import { createCareRecipientsStore } from "./services/care-recipients/db.ts";
 import { createCareRecipientsRouter } from "./services/care-recipients/routes.ts";
+import { createVitalsStore } from "./services/vitals/db.ts";
+import { createVitalsRouter } from "./services/vitals/routes.ts";
 import {
   buildCompareResponse,
   DrugRecordSchema,
@@ -1061,6 +1064,18 @@ app.post("/agent/policy", (req, res) => {
     },
   });
   res.json({ success: true, policy: result.data });
+});
+// #1237: manual vitals logging, charted alongside medication adherence.
+app.use("/agent", createVitalsRouter(createVitalsStore()));
+// #1238: preview a policy change against recent payment history.
+app.post("/agent/policy/preview", (req, res) => {
+  const result = SpendingPolicySchema.safeParse(req.body);
+  if (!result.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid policy", issues: result.error.issues });
+  }
+  res.json({ impact: previewSpendingPolicy(result.data) });
 });
 app.post("/agent/reset", (req, res) => {
   resetSpendingTracker();

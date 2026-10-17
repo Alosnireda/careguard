@@ -40,11 +40,14 @@ import {
   confirmAdherenceReminder,
   setCurrentRecipient,
   SpendingPolicySchema,
+  previewSpendingPolicy,
   getDataDir,
   payForMedication,
   payBill,
 } from "./tools.ts";
-import { getPendingAdherences, skipAdherence } from "../shared/adherence.ts";
+import { getAdherenceTimeline, getPendingAdherences, skipAdherence } from "../shared/adherence.ts";
+import { createVitalsStore } from "../services/vitals/db.ts";
+import { createVitalsRouter } from "../services/vitals/routes.ts";
 import { notify } from "../shared/notifications.ts";
 import { resolveStellarNetwork, validateSignerKeyForNetwork } from "../shared/stellar-network.ts";
 import { verifyWebhook } from "../shared/verify-webhook.ts";
@@ -389,26 +392,14 @@ app.post("/agent/run", async (req, res) => {
           llmMaxTokensSummary: LLM_MAX_TOKENS_SUMMARY,
           llmContextWindow: parseInt(process.env.LLM_CONTEXT_WINDOW || "32768", 10),
           piiScrub: _piiScrub,
+          // #1253: surface the in-flight tool so the dashboard's loading state can
+          // show which step of a multi-tool-call task is running.
+          onProgress: (progress) => broadcastSSE("run_progress", progress),
         }),
       (queueWaitMs) => {
         res.setHeader("Server-Timing", `agent-queue;dur=${queueWaitMs.toFixed(2)}`);
       },
     );
-      llm,
-      model: LLM_MODEL,
-      maxIterations: MAX_ITERATIONS,
-      maxToolCallsPerRun: MAX_TOOL_CALLS_PER_RUN,
-      llmToolTemperature: LLM_TOOL_TEMPERATURE,
-      llmSummaryTemperature: LLM_SUMMARY_TEMPERATURE,
-      llmMaxTokensToolResult: LLM_MAX_TOKENS_TOOL_RESULT,
-      llmMaxTokensSimple: LLM_MAX_TOKENS_SIMPLE,
-      llmMaxTokensSummary: LLM_MAX_TOKENS_SUMMARY,
-      llmContextWindow: parseInt(process.env.LLM_CONTEXT_WINDOW || "32768", 10),
-      piiScrub: _piiScrub,
-      // #1253: surface the in-flight tool so the dashboard's loading state can
-      // show which step of a multi-tool-call task is running.
-      onProgress: (progress) => broadcastSSE("run_progress", progress),
-    }));
     agentRunsTotal.inc({ status: "success" });
     logger.info({ toolCalls: result.toolCalls.length, truncated: result.truncated, promptTokens: result.llmUsage.promptTokens, completionTokens: result.llmUsage.completionTokens }, "agent task complete");
     broadcastSSE("spending", getSpendingSummary());
@@ -455,6 +446,17 @@ app.post("/agent/policy", (req, res) => {
   });
   broadcastSSE("spending", getSpendingSummary());
   res.json({ success: true, policy: result.data, recipientId });
+});
+// #1238: replay recent payments through check_spending_policy's rules under
+// the proposed policy so the dashboard can preview a change before saving it.
+app.post("/agent/policy/preview", (req, res) => {
+  const result = SpendingPolicySchema.safeParse(req.body);
+  if (!result.success) {
+    return res.status(400).json({ error: "Invalid policy", issues: result.error.issues });
+  }
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  setCurrentRecipient(recipientId);
+  res.json({ recipientId, impact: previewSpendingPolicy(result.data) });
 });
 app.post("/agent/reset", (req, res) => {
   const recipientId = (req.query.recipient_id as string) || "rosa";
@@ -573,6 +575,12 @@ app.get("/agent/adherence/pending", (req, res) => {
   res.json({ pending, count: pending.length, recipientId });
 });
 
+// #1237: dated adherence events, charted alongside logged vitals.
+app.get("/agent/adherence/timeline", (req, res) => {
+  const recipientId = (req.query.recipient_id as string) || "rosa";
+  res.json({ recipientId, events: getAdherenceTimeline(recipientId) });
+});
+
 app.post("/agent/adherence/confirm", (req, res) => {
   const { record_id } = req.body ?? {};
   if (!record_id) return res.status(400).json({ error: "record_id is required" });
@@ -588,6 +596,9 @@ app.post("/agent/adherence/skip", (req, res) => {
   const success = skipAdherence(record_id);
   res.json({ success });
 });
+
+// --- Vitals endpoints (#1237) ---
+app.use("/agent", createVitalsRouter(createVitalsStore()));
 
 // --- Dispute letter endpoint (#266) ---
 app.post("/agent/dispute-letter", (req, res) => {

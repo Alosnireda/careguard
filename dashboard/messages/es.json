@@ -33,7 +33,11 @@
     "limit": "límite",
     "bySwitching": "cambiando de farmacia",
     "inOvercharges": "en sobrecargos identificados",
-    "queries": "consultas vía x402"
+    "queries": "consultas vía x402",
+    "notRunYet": "Aún no ejecutado",
+    "runForSavings": "Ejecute una tarea para ver ahorros",
+    "runForBillingErrors": "Audite una factura para ver errores detectados",
+    "runForApiCosts": "Ejecute una tarea para ver costos del agente"
   },
   "budget": {
     "medications": "Medicamentos",
@@ -77,7 +81,9 @@
     "showAll": "Mostrar todo",
     "sortByOvercharge": "Ordenar por sobrecargo",
     "sortDefault": "Orden predeterminado",
-    "notAudited": "No hay facturas auditadas. Ejecute \"Auditar Factura\" desde Resumen."
+    "notAudited": "CareGuard revisa las facturas del hospital línea por línea para detectar cobros excesivos y errores antes de pagar.",
+    "runAudit": "Auditar una factura del hospital",
+    "runAuditHint": "Tarda alrededor de un minuto — se ejecuta desde la pestaña Resumen."
   },
   "policy": {
     "title": "Política de Gastos para Rosa",
@@ -165,5 +171,28 @@
     "loading": "Cargando...",
     "error": "Error",
     "retry": "Intentar de Nuevo"
+  },
+  "vitals": {
+    "title": "Signos vitales",
+    "description": "Registre lecturas para ver cómo se relacionan con las dosis tomadas u omitidas.",
+    "typeLabel": "Tipo de signo vital",
+    "weight": "Peso",
+    "bloodPressure": "Presión arterial",
+    "glucose": "Glucosa",
+    "systolic": "Sistólica",
+    "diastolic": "Diastólica",
+    "log": "Registrar lectura",
+    "invalid": "Ingrese un número positivo para cada lectura.",
+    "saveFailed": "No se pudo guardar la lectura — inténtelo de nuevo.",
+    "empty": "Aún no hay lecturas registradas para este signo vital.",
+    "recent": "Lecturas recientes",
+    "date": "Fecha",
+    "reading": "Lectura",
+    "doseTaken": "Dosis tomada",
+    "doseMissed": "Dosis omitida",
+    "dosePending": "Dosis pendiente",
+    "trendAria": "tendencia",
+    "readings": "lecturas",
+    "adherenceEvents": "eventos de adherencia"
   }
 }

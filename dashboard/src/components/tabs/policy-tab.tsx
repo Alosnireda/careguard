@@ -12,6 +12,7 @@ import type { SpendingData } from "../types";
 import { Bar } from "../primitives/bar";
 import { Toast } from "../primitives/toast";
 import { getTranslations, type Locale } from "../../i18n";
+import { agentFetch } from "../../lib/agent-fetch";
 
 const FIELDS: Array<keyof SpendingPolicyInput> = [
   "dailyLimit",
@@ -69,6 +70,69 @@ interface PolicyChangeRow {
   increased: boolean;
   doubled: boolean;
   delta?: number;
+}
+
+type PolicyOutcome = "allowed" | "requires_approval" | "blocked";
+
+/** Response of POST /agent/policy/preview (#1238). */
+export interface PolicyImpact {
+  evaluated: number;
+  newlyBlocked: number;
+  newlyAllowed: number;
+  approvalChanged: number;
+  entries: Array<{
+    id: string;
+    timestamp: string;
+    description: string;
+    amount: number;
+    before: PolicyOutcome;
+    after: PolicyOutcome;
+    changed: boolean;
+  }>;
+}
+
+type ImpactState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "ready"; impact: PolicyImpact };
+
+const OUTCOME_LABEL: Record<PolicyOutcome, string> = {
+  allowed: "allowed",
+  requires_approval: "needs approval",
+  blocked: "blocked",
+};
+
+/** One-line summary of how the change would have treated recent payments. */
+export function describePolicyImpact(impact: PolicyImpact): string {
+  const n = impact.evaluated;
+  if (n === 0) return "There are no recent payments to compare this change against yet.";
+  const of = `of the last ${n} payment${n === 1 ? "" : "s"}`;
+  const parts: string[] = [];
+  if (impact.newlyBlocked > 0) parts.push(`would have blocked ${impact.newlyBlocked} ${of}`);
+  if (impact.newlyAllowed > 0) parts.push(`would have allowed ${impact.newlyAllowed} ${of} that were blocked`);
+  if (impact.approvalChanged > 0) {
+    parts.push(`would have changed the approval requirement for ${impact.approvalChanged}`);
+  }
+  if (parts.length === 0) return `This change would not have affected any ${of}.`;
+  return `This change ${parts.join("; ")}.`;
+}
+
+async function fetchPolicyImpact(policy: SpendingPolicyInput): Promise<PolicyImpact> {
+  const res = await agentFetch("/agent/policy/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(policy),
+  });
+  if (!res.ok) throw new Error(`preview failed (${res.status})`);
+  const body = await res.json();
+  if (!body?.impact || typeof body.impact.evaluated !== "number") {
+    throw new Error("malformed preview");
+  }
+  return body.impact as PolicyImpact;
+}
+
+function formatPolicyValue(key: string, value: number): string {
+  return key === "holdTimeSeconds" ? `${value}s` : `$${value}`;
 }
 
 function getImpactExplanation(rows: PolicyChangeRow[]): string {
@@ -137,6 +201,8 @@ export function PolicyTab({
   const [confirmRows, setConfirmRows] = useState<PolicyChangeRow[] | null>(null);
   const [requiresTyped, setRequiresTyped] = useState(false);
   const [typedValue, setTypedValue] = useState("");
+  const [impactState, setImpactState] = useState<ImpactState | null>(null);
+  const previewSeq = useRef(0);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
   const [debounceTimeout, setDebounceTimeout] = useState<NodeJS.Timeout | null>(null);
 
@@ -160,37 +226,53 @@ export function PolicyTab({
       return;
     }
 
-    const rows: PolicyChangeRow[] = LIMIT_FIELDS.map((key) => {
+    const rows: PolicyChangeRow[] = FIELDS.map((key) => {
       const before = Number(baseline[key]);
       const after = Number(policyForm[key]);
+      // Only raised spending limits add exposure; a longer hold is safe (#216).
       const increased =
+        LIMIT_FIELDS.includes(key) &&
         Number.isFinite(before) && Number.isFinite(after) && after > before;
       const doubled = increased && before > 0 && after > before * 2;
       return { key, label: t.policy[FIELD_T_KEY[key] as keyof typeof t.policy] ?? key, before, after, increased, doubled };
     }).filter((row) => row.before !== row.after);
 
-    const increases = rows.filter((row) => row.increased);
-    // Decreases (and unchanged limits) are the safe direction — save silently.
-    if (increases.length === 0) {
+    // Nothing changed — there is nothing to preview.
+    if (rows.length === 0) {
       void persistPolicy();
       return;
     }
 
+    // #1238: every change goes through the old-vs-new preview, with an
+    // estimate of how it would have treated recent payments, before saving.
     setTypedValue("");
-    setRequiresTyped(increases.some((row) => row.doubled));
+    setRequiresTyped(rows.some((row) => row.doubled));
     setConfirmRows(rows);
+    const seq = ++previewSeq.current;
+    setImpactState({ status: "loading" });
+    fetchPolicyImpact(policyForm)
+      .then((impact) => {
+        if (previewSeq.current === seq) setImpactState({ status: "ready", impact });
+      })
+      .catch(() => {
+        if (previewSeq.current === seq) setImpactState({ status: "error" });
+      });
+  }
+
+  function closePreview() {
+    previewSeq.current++;
+    setConfirmRows(null);
+    setRequiresTyped(false);
+    setTypedValue("");
+    setImpactState(null);
   }
 
   function cancelConfirm() {
-    setConfirmRows(null);
-    setRequiresTyped(false);
-    setTypedValue("");
+    closePreview();
   }
 
   async function confirmSave() {
-    setConfirmRows(null);
-    setRequiresTyped(false);
-    setTypedValue("");
+    closePreview();
     await persistPolicy();
   }
 
@@ -381,10 +463,16 @@ export function PolicyTab({
             >
               Confirm policy change
             </h3>
-            <p className="text-xs text-amber-700 mb-2">
-              You are raising one or more limits. This increases your spending
-              exposure — please review before saving.
-            </p>
+            {confirmRows.some((row) => row.increased) ? (
+              <p className="text-xs text-amber-700 mb-2">
+                You are raising one or more limits. This increases your spending
+                exposure — please review before saving.
+              </p>
+            ) : (
+              <p className="text-xs text-slate-600 mb-2">
+                Review how this change compares with your current policy before saving.
+              </p>
+            )}
             {getImpactExplanation(confirmRows) && (
               <p className="text-xs text-slate-700 mb-4 p-2 bg-amber-50 rounded border border-amber-200">
                 {getImpactExplanation(confirmRows)}
@@ -399,7 +487,7 @@ export function PolicyTab({
                 >
                   <span className="text-slate-600">{row.label}</span>
                   <span className="font-mono">
-                    <span className="text-slate-500">${row.before}</span>
+                    <span className="text-slate-500">{formatPolicyValue(row.key, row.before)}</span>
                     <span className="mx-1 text-slate-400">&rarr;</span>
                     <span
                       className={
@@ -408,7 +496,7 @@ export function PolicyTab({
                           : "text-green-600"
                       }
                     >
-                      ${row.after}
+                      {formatPolicyValue(row.key, row.after)}
                     </span>
                     {row.doubled && (
                       <span className="ml-1 text-red-600">(more than 2&times;)</span>
@@ -417,6 +505,54 @@ export function PolicyTab({
                 </li>
               ))}
             </ul>
+
+            <div
+              aria-live="polite"
+              data-testid="policy-impact"
+              className="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs"
+            >
+              <p className="font-semibold text-slate-700 mb-1">
+                Impact on recent payments
+              </p>
+              {(!impactState || impactState.status === "loading") && (
+                <p className="text-slate-500">Checking recent payments…</p>
+              )}
+              {impactState?.status === "error" && (
+                <p className="text-slate-500">
+                  Couldn&apos;t estimate the impact right now. You can still save the change.
+                </p>
+              )}
+              {impactState?.status === "ready" && (
+                <>
+                  <p className="text-slate-700">{describePolicyImpact(impactState.impact)}</p>
+                  {impactState.impact.entries.some((e) => e.changed) && (
+                    <ul className="mt-2 space-y-1">
+                      {impactState.impact.entries
+                        .filter((e) => e.changed)
+                        .slice(0, 5)
+                        .map((e) => (
+                          <li key={e.id} className="flex items-center justify-between gap-2">
+                            <span className="truncate text-slate-600">
+                              {e.description} (${e.amount.toFixed(2)})
+                            </span>
+                            <span className="shrink-0 font-mono">
+                              <span className="text-slate-500">{OUTCOME_LABEL[e.before]}</span>
+                              <span className="mx-1 text-slate-400">&rarr;</span>
+                              <span
+                                className={
+                                  e.after === "blocked" ? "text-red-600 font-semibold" : "text-green-700"
+                                }
+                              >
+                                {OUTCOME_LABEL[e.after]}
+                              </span>
+                            </span>
+                          </li>
+                        ))}
+                    </ul>
+                  )}
+                </>
+              )}
+            </div>
 
             {requiresTyped && (
               <div className="mb-4">

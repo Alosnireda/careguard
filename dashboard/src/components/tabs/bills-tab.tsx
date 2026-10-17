@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useCallback, useRef, useEffect } from "react";
 import { toast } from "sonner";
 import {
@@ -814,8 +815,35 @@ export function BillsTab({
           );
         })
       ) : (
-        <div className="bg-white rounded-xl border border-slate-200 p-12 text-center text-sm text-slate-400">
-          {b.notAudited}
+        // #1240: lead with the benefit, then offer the action as a real link.
+        <div className="bg-white rounded-xl border border-dashed border-slate-300 p-12 text-center">
+          <div
+            aria-hidden="true"
+            className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-amber-50 text-amber-600"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+              className="h-6 w-6"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M9 12.75 11.25 15 15 9.75M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z"
+              />
+            </svg>
+          </div>
+          <p className="mx-auto max-w-sm text-sm text-slate-600">{b.notAudited}</p>
+          <Link
+            href="?tab=overview"
+            className="mt-4 inline-flex items-center rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600 active:bg-sky-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2"
+          >
+            {b.runAudit}
+          </Link>
+          <p className="mt-2 text-xs text-slate-400">{b.runAuditHint}</p>
         </div>
       )}
     </div>

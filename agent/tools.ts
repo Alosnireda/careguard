@@ -1791,34 +1791,56 @@ export async function checkDrugInteractions(medications: string[]) {
 export function checkSpendingPolicy(amount: number, category: PaymentCategory) {
   // Always load the latest policy from disk so multi-instance deployments
   // pick up caregiver updates performed via POST /agent/policy.
-  const policy = loadPolicy();
+  return evaluateSpendingPolicy(loadPolicy(), spendingTracker, amount, category);
+}
+
+/** Month-to-date spend a policy decision is evaluated against. */
+export interface SpendingPolicyState {
+  medications: number;
+  bills: number;
+  serviceFees: number;
+  transactions: ReadonlyArray<Pick<Transaction, "timestamp" | "amount" | "category">>;
+}
+
+/**
+ * Pure policy decision behind check_spending_policy. Split out so the
+ * dashboard's policy-change preview (#1238) can replay historical
+ * transactions through the exact same rules instead of duplicating them.
+ * `now` picks the "today" window used for the daily limit.
+ */
+export function evaluateSpendingPolicy(
+  policy: SpendingPolicy,
+  state: SpendingPolicyState,
+  amount: number,
+  category: PaymentCategory,
+  now: Date = new Date(),
+) {
   const budget =
     category === TRANSACTION_CATEGORY.MEDICATIONS
       ? policy.medicationMonthlyBudget
       : policy.billMonthlyBudget;
   const currentSpending =
     category === TRANSACTION_CATEGORY.MEDICATIONS
-      ? spendingTracker.medications
-      : spendingTracker.bills;
+      ? state.medications
+      : state.bills;
   const remaining = roundBudget(budget - currentSpending);
   const totalMonthlySpending =
-    spendingTracker.medications +
-    spendingTracker.bills +
-    spendingTracker.serviceFees;
+    state.medications +
+    state.bills +
+    state.serviceFees;
   const globalRemaining = roundBudget(
     policy.monthlyLimit - totalMonthlySpending,
   );
-
   // Compute today's spend in this category up-front so every return path can
   // report the remaining daily budget to the caller (Issue #160). Use the
   // policy's per-recipient timezone if set; fall back to the global
   // SPENDING_TIMEZONE env var so caregivers in non-UTC locales see the correct
   // "today" boundary for their wall clock (Issue #207).
   const effectiveTz = policy.timezone ?? SPENDING_TIMEZONE;
-  const { dayStart, dayEnd } = getLocalDayBounds(effectiveTz);
+  const { dayStart, dayEnd } = getLocalDayBounds(effectiveTz, now);
   const dayStartMs = dayStart.getTime();
   const dayEndMs = dayEnd.getTime();
-  const totalToday = spendingTracker.transactions
+  const totalToday = state.transactions
     .filter((t) => {
       const txTimestamp = new Date(t.timestamp).getTime();
       return (
@@ -1878,6 +1900,150 @@ export function checkSpendingPolicy(amount: number, category: PaymentCategory) {
     dailyRemaining,
     monthlyRemaining,
   };
+}
+
+export type PolicyOutcome = "allowed" | "requires_approval" | "blocked";
+
+export interface PolicyImpactEntry {
+  id: string;
+  timestamp: string;
+  description: string;
+  amount: number;
+  category: PaymentCategory;
+  before: PolicyOutcome;
+  after: PolicyOutcome;
+  changed: boolean;
+}
+
+export interface PolicyImpact {
+  /** How many recent payments were replayed. */
+  evaluated: number;
+  /** Payments the current policy allowed that the proposed one would block. */
+  newlyBlocked: number;
+  /** Payments the current policy blocked that the proposed one would allow. */
+  newlyAllowed: number;
+  /** Payments whose approval requirement flips either way. */
+  approvalChanged: number;
+  entries: PolicyImpactEntry[];
+}
+
+function policyOutcome(
+  result: ReturnType<typeof evaluateSpendingPolicy>,
+): PolicyOutcome {
+  if (!result.allowed) return "blocked";
+  return result.requiresApproval ? "requires_approval" : "allowed";
+}
+
+function yearMonthOf(date: Date, tz: string): string {
+  return getLocalDateStr(tz, date).slice(0, 7);
+}
+
+/**
+ * Estimates how a proposed policy would have treated the recipient's most
+ * recent medication/bill payments (#1238). Each payment is re-evaluated with
+ * evaluateSpendingPolicy() against the month-to-date and same-day spend that
+ * preceded it, once under the current policy and once under the proposed one.
+ * Prior spend is taken as it actually happened, so the estimate answers "would
+ * this payment have gone through?" rather than modelling cascading effects.
+ */
+export function simulatePolicyImpact(
+  currentPolicy: SpendingPolicy,
+  proposedPolicy: SpendingPolicy,
+  transactions: ReadonlyArray<Transaction>,
+  limit = 10,
+): PolicyImpact {
+  const tz = currentPolicy.timezone ?? SPENDING_TIMEZONE;
+  const spent = transactions
+    .filter((t) => {
+      const ts = new Date(t.timestamp).getTime();
+      return (
+        Number.isFinite(ts) &&
+        (t.status === "completed" || t.status === "approved") &&
+        Number.isFinite(t.amount)
+      );
+    })
+    .sort(
+      (a, b) =>
+        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+    );
+
+  const payments = spent
+    .filter(
+      (t) =>
+        t.category === TRANSACTION_CATEGORY.MEDICATIONS ||
+        t.category === TRANSACTION_CATEGORY.BILLS,
+    )
+    .slice(-limit);
+
+  const entries = payments.map((tx): PolicyImpactEntry => {
+    const at = new Date(tx.timestamp);
+    const atMs = at.getTime();
+    const month = yearMonthOf(at, tz);
+    const prior = spent.filter((t) => {
+      const ts = new Date(t.timestamp).getTime();
+      return t !== tx && ts <= atMs && yearMonthOf(new Date(ts), tz) === month;
+    });
+    const sum = (category: string) =>
+      prior
+        .filter((t) => t.category === category)
+        .reduce((s, t) => s + t.amount, 0);
+    const state: SpendingPolicyState = {
+      medications: sum(TRANSACTION_CATEGORY.MEDICATIONS),
+      bills: sum(TRANSACTION_CATEGORY.BILLS),
+      serviceFees: sum(TRANSACTION_CATEGORY.SERVICE_FEES),
+      transactions: prior,
+    };
+    const category = tx.category as PaymentCategory;
+    const before = policyOutcome(
+      evaluateSpendingPolicy(currentPolicy, state, tx.amount, category, at),
+    );
+    const after = policyOutcome(
+      evaluateSpendingPolicy(proposedPolicy, state, tx.amount, category, at),
+    );
+    return {
+      id: tx.id,
+      timestamp: tx.timestamp,
+      description: tx.description,
+      amount: tx.amount,
+      category,
+      before,
+      after,
+      changed: before !== after,
+    };
+  });
+
+  return {
+    evaluated: entries.length,
+    newlyBlocked: entries.filter(
+      (e) => e.before !== "blocked" && e.after === "blocked",
+    ).length,
+    newlyAllowed: entries.filter(
+      (e) => e.before === "blocked" && e.after !== "blocked",
+    ).length,
+    approvalChanged: entries.filter(
+      (e) =>
+        e.before !== "blocked" &&
+        e.after !== "blocked" &&
+        e.before !== e.after,
+    ).length,
+    entries: entries.reverse(),
+  };
+}
+
+/** Preview of a proposed policy against the current recipient's history. */
+export function previewSpendingPolicy(
+  proposed: SpendingPolicyInput,
+  limit?: number,
+): PolicyImpact {
+  const current = loadPolicy();
+  const normalized: SpendingPolicy = { ...current, ...proposed } as SpendingPolicy;
+  assertValidSpendingPolicy(normalized);
+  return simulatePolicyImpact(
+    current,
+    normalized,
+    spendingTracker.transactions,
+    limit,
+  );
 }
 
 async function executeMedicationPayment(
