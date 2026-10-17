@@ -504,6 +504,17 @@ describe("GET /pharmacy/compare", () => {
     expect(typeof res.body.savingsPercent).toBe("number");
     expect(res.body.potentialSavings).toBeGreaterThan(0);
   });
+
+  it("reports inStock: true for every pharmacy, never 'unknown' (Issue #1063)", async () => {
+    const { app } = makeApp();
+    await seedCompareData(app);
+    const res = await request(app).get("/pharmacy/compare").query({ drug: "lisinopril", zip: "90210" });
+    expect(res.status).toBe(200);
+    expect(res.body.prices.length).toBeGreaterThan(0);
+    for (const price of res.body.prices) {
+      expect(price.inStock).toBe(true);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
