@@ -48,6 +48,8 @@ import {
 import { getAdherenceTimeline, getPendingAdherences, skipAdherence } from "../shared/adherence.ts";
 import { createVitalsStore } from "../services/vitals/db.ts";
 import { createVitalsRouter } from "../services/vitals/routes.ts";
+import { createCareRecipientsStore } from "../services/care-recipients/db.ts";
+import { authorizeApprovalActor, createDelegationsRouter } from "../services/care-recipients/delegation.ts";
 import { notify } from "../shared/notifications.ts";
 import { resolveStellarNetwork, validateSignerKeyForNetwork } from "../shared/stellar-network.ts";
 import { verifyWebhook } from "../shared/verify-webhook.ts";
@@ -246,11 +248,38 @@ app.get("/agent/pending-approvals", (req, res) => {
   res.json({ approvals: pending, recipientId });
 });
 
-// Approve or reject a pending transaction
+// Temporary approval delegation (#1195). Same SQLite file as the unified server's store.
+const delegationStore = createCareRecipientsStore();
+app.use("/agent", createDelegationsRouter(delegationStore));
+
+// Approve or reject a pending transaction.
+// Optional body: caregiver_id (who is acting) and on_behalf_of (whose authority
+// they're using). Acting on_behalf_of someone requires an active delegation.
 app.post("/agent/approvals/:txId", async (req, res) => {
   const { txId } = req.params;
   const { approve } = req.body;
   const recipientId = (req.query.recipient_id as string) || (req.body.recipient_id as string) || "rosa";
+  const authz = authorizeApprovalActor(delegationStore, {
+    recipientId,
+    caregiverId: req.body?.caregiver_id,
+    onBehalfOf: req.body?.on_behalf_of,
+  });
+  if (!authz.ok) return res.status(authz.status).json({ error: authz.error });
+  const recordDecision = (status: string) =>
+    appendAuditEntry({
+      event: "approval_decision",
+      actor: authz.actor,
+      details: {
+        txId,
+        recipientId,
+        decision: approve ? "approve" : "deny",
+        status,
+        delegated: authz.delegated,
+        ...(authz.delegated
+          ? { onBehalfOf: authz.onBehalfOf, delegationId: authz.delegation.id, delegationEndsAt: authz.delegation.ends_at }
+          : {}),
+      },
+    });
   setCurrentRecipient(recipientId);
   const tracker = getSpendingTracker();
   const txIndex = tracker.transactions.findIndex((t: any) => t.id === txId);
@@ -261,7 +290,8 @@ app.post("/agent/approvals/:txId", async (req, res) => {
   if (!approve) {
     (tx as any).status = "rejected";
     saveSpending(tracker);
-    return res.json({ success: true, status: "rejected" });
+    recordDecision("rejected");
+    return res.json({ success: true, status: "rejected", delegated: authz.delegated });
   }
 
   try {
@@ -287,10 +317,12 @@ app.post("/agent/approvals/:txId", async (req, res) => {
       tx.stellarTxHash = result.transaction?.stellarTxHash;
       tracker.transactions[txIndex] = tx;
       saveSpending(tracker);
-      return res.json({ success: true, status: "completed", transaction: result.transaction });
+      recordDecision("completed");
+      return res.json({ success: true, status: "completed", transaction: result.transaction, delegated: authz.delegated });
     } else {
       (tx as any).status = "rejected";
       saveSpending(tracker);
+      recordDecision("payment_failed");
       return res.status(400).json({ success: false, error: result.error, status: "rejected" });
     }
   } catch (err: any) {

@@ -27,6 +27,34 @@ interface CareRecipientRow {
   caregiver_user_id: string | null;
 }
 
+/**
+ * Temporary approval delegation (#1195): `delegator` (the primary caregiver)
+ * lets `delegate` (a co-caregiver) approve/deny pending transactions for one
+ * recipient between `starts_at` and `ends_at`. A delegation is active only
+ * inside that window and while `revoked_at` is null, so it expires on its own
+ * at `ends_at` with no background job.
+ */
+export interface ApprovalDelegation {
+  id: string;
+  recipient_id: string;
+  delegator: string;
+  delegate: string;
+  starts_at: string;
+  ends_at: string;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export type DelegationStatus = 'scheduled' | 'active' | 'expired' | 'revoked';
+
+export function delegationStatus(d: ApprovalDelegation, now: Date = new Date()): DelegationStatus {
+  if (d.revoked_at) return 'revoked';
+  const t = now.getTime();
+  if (t < Date.parse(d.starts_at)) return 'scheduled';
+  if (t >= Date.parse(d.ends_at)) return 'expired';
+  return 'active';
+}
+
 function defaultDbPath(): string {
   if (process.env.CARE_RECIPIENTS_DB_PATH) {
     return path.resolve(process.cwd(), process.env.CARE_RECIPIENTS_DB_PATH);
@@ -80,6 +108,20 @@ export class CareRecipientsStore {
         insurance TEXT,
         caregiver_user_id TEXT
       );
+      CREATE TABLE IF NOT EXISTS approval_delegations (
+        id TEXT PRIMARY KEY,
+        recipient_id TEXT NOT NULL,
+        delegator TEXT NOT NULL,
+        delegate TEXT NOT NULL,
+        starts_at TEXT NOT NULL,
+        ends_at TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL,
+        CHECK (delegator <> delegate),
+        CHECK (ends_at > starts_at)
+      );
+      CREATE INDEX IF NOT EXISTS idx_approval_delegations_lookup
+        ON approval_delegations (recipient_id, delegate, ends_at);
     `);
   }
 
@@ -136,6 +178,64 @@ export class CareRecipientsStore {
       input.caregiver_user_id ?? null,
     );
     return this.getById(id)!;
+  }
+
+  // ── Approval delegations (#1195) ──────────────────────────────────────────
+
+  createDelegation(input: {
+    recipient_id: string;
+    delegator: string;
+    delegate: string;
+    starts_at: string;
+    ends_at: string;
+  }): ApprovalDelegation {
+    const id = `dlg_${randomUUID()}`;
+    this.db.prepare(`
+      INSERT INTO approval_delegations (id, recipient_id, delegator, delegate, starts_at, ends_at, revoked_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+    `).run(id, input.recipient_id, input.delegator, input.delegate, input.starts_at, input.ends_at, new Date().toISOString());
+    return this.getDelegation(id)!;
+  }
+
+  getDelegation(id: string): ApprovalDelegation | undefined {
+    return this.db.prepare('SELECT * FROM approval_delegations WHERE id = ?').get(id) as ApprovalDelegation | undefined;
+  }
+
+  listDelegations(recipientId: string): ApprovalDelegation[] {
+    return this.db
+      .prepare('SELECT * FROM approval_delegations WHERE recipient_id = ? ORDER BY starts_at DESC')
+      .all(recipientId) as ApprovalDelegation[];
+  }
+
+  /** The delegation letting `delegate` act for `delegator` on this recipient right now, if any. */
+  findActiveDelegation(recipientId: string, delegator: string, delegate: string, now: Date = new Date()): ApprovalDelegation | undefined {
+    const iso = now.toISOString();
+    return this.db.prepare(`
+      SELECT * FROM approval_delegations
+      WHERE recipient_id = ? AND delegator = ? AND delegate = ?
+        AND revoked_at IS NULL AND starts_at <= ? AND ends_at > ?
+      ORDER BY ends_at DESC LIMIT 1
+    `).get(recipientId, delegator, delegate, iso, iso) as ApprovalDelegation | undefined;
+  }
+
+  /** Active delegations held by `delegate` on this recipient (for the approvals banner). */
+  listActiveDelegationsFor(recipientId: string, delegate: string, now: Date = new Date()): ApprovalDelegation[] {
+    const iso = now.toISOString();
+    return this.db.prepare(`
+      SELECT * FROM approval_delegations
+      WHERE recipient_id = ? AND delegate = ?
+        AND revoked_at IS NULL AND starts_at <= ? AND ends_at > ?
+      ORDER BY ends_at ASC
+    `).all(recipientId, delegate, iso, iso) as ApprovalDelegation[];
+  }
+
+  /** Revoke early. Only the delegator may revoke; returns the updated row or undefined if not theirs/already ended. */
+  revokeDelegation(id: string, delegator: string, now: Date = new Date()): ApprovalDelegation | undefined {
+    const result = this.db.prepare(`
+      UPDATE approval_delegations SET revoked_at = ?
+      WHERE id = ? AND delegator = ? AND revoked_at IS NULL AND ends_at > ?
+    `).run(now.toISOString(), id, delegator, now.toISOString());
+    return result.changes > 0 ? this.getDelegation(id) : undefined;
   }
 }
 
