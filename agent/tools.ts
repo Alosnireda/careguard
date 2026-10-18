@@ -164,6 +164,23 @@ const PHARMACY_API = getServiceUrl("pharmacy-api");
 const BILL_AUDIT_API = getServiceUrl("bill-audit-api");
 const DRUG_INTERACTION_API = getServiceUrl("drug-interaction-api");
 const PHARMACY_PAYMENT_API = getServiceUrl("pharmacy-payment-api");
+
+// x402 upstreams named in connection-error diagnostics (Issue #1062).
+const PHARMACY_UPSTREAM: UpstreamService = {
+  label: "Pharmacy API",
+  envVar: "PHARMACY_API_URL",
+  baseUrl: PHARMACY_API,
+};
+const BILL_AUDIT_UPSTREAM: UpstreamService = {
+  label: "Bill Audit API",
+  envVar: "BILL_AUDIT_API_URL",
+  baseUrl: BILL_AUDIT_API,
+};
+const DRUG_INTERACTION_UPSTREAM: UpstreamService = {
+  label: "Drug Interaction API",
+  envVar: "DRUG_INTERACTION_API_URL",
+  baseUrl: DRUG_INTERACTION_API,
+};
 const USDC_ISSUER =
   process.env.USDC_ISSUER ||
   "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
@@ -1166,6 +1183,54 @@ function truncateError(message: string): string {
   return message.replace(/<[^>]*>/g, "").slice(0, MAX_ERROR_LENGTH);
 }
 
+interface UpstreamService {
+  label: string;
+  envVar: string;
+  baseUrl: string;
+}
+
+/**
+ * Translate a network-level fetch failure into an actionable error that names
+ * the upstream's env var (Issue #1062). Node's fetch (undici) rejects with
+ * `TypeError: fetch failed` and carries the socket error code on `err.cause`;
+ * @x402/fetch propagates that rejection unchanged.
+ */
+function upstreamConnectionError(service: UpstreamService, err: any): Error {
+  const { label, envVar, baseUrl } = service;
+  const docsHint = "See docs/setup/services.md for local service setup.";
+  const message =
+    typeof err?.message === "string" ? err.message : "Unknown network error";
+  const code = err?.cause?.code || err?.code;
+
+  if (code === "ECONNREFUSED") {
+    return new Error(
+      `${label} connection refused (ECONNREFUSED). This is usually a config or startup issue. ` +
+        `Ensure ${envVar} points to a running service (currently ${baseUrl}). ${docsHint}`,
+    );
+  }
+
+  if (
+    code === "ETIMEDOUT" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "UND_ERR_SOCKET"
+  ) {
+    return new Error(
+      `${label} request timed out. This is often transient (network hiccup or cold start). ` +
+        `Try again; if it persists, verify the service at ${baseUrl} is reachable. ${docsHint}`,
+    );
+  }
+
+  if (code === "ENOTFOUND") {
+    return new Error(
+      `${label} hostname not found (ENOTFOUND). Check ${envVar} (currently ${baseUrl}). ${docsHint}`,
+    );
+  }
+
+  return new Error(
+    `${label} unreachable. ${message}. Verify the service is reachable at ${baseUrl}. ${docsHint}`,
+  );
+}
+
 function recordServiceFee(
   amount: number,
   description: string,
@@ -1198,58 +1263,78 @@ function recordServiceFee(
   appendTransaction(tx);
 }
 
+/** A payment the agent intends to make; recorded if the policy blocks or holds it. */
+type PaymentIntent = Pick<
+  Transaction,
+  "type" | "description" | "amount" | "recipient"
+> & { category: PaymentCategory };
+
+export type SpendingUpdate =
+  | { ok: true }
+  | {
+      ok: false;
+      status: "blocked" | "pending";
+      policyCheck: ReturnType<typeof checkSpendingPolicy>;
+      transaction: Transaction;
+    };
+
 /**
- * Atomically apply a spending delta under the per-recipient budget mutex (Issue #17).
+ * Atomically check the spending policy and reserve a payment's amount under the
+ * per-recipient budget mutex (Issues #17, #209, #1060).
  *
- * The check-and-reserve is performed inside the same mutex lock that
- * payForMedication / payBill acquire, so concurrent calls cannot both pass the
- * budget gate when only one slot remains.
+ * This is the single check-and-reserve path for payForMedication / payBill. The
+ * policy decision, the blocked/pending transaction record and the reservation
+ * all happen in one critical section, so concurrent payments cannot both pass a
+ * gate when only one slot remains, and a held payment already counts toward the
+ * daily limit when the next caller is evaluated. If the payment itself then
+ * fails, the caller rolls the reservation back by subtracting `intent.amount`.
  *
- * @returns `{ ok: true }` if the delta was applied, or `{ ok: false, reason }` if
- *          the budget would be exceeded after applying `delta`.
+ * Time: O(n) in the recipient's transaction count (the daily-limit scan in
+ * evaluateSpendingPolicy). Space: O(1) beyond the recorded transaction.
  */
 export async function updateSpending(
-  category: "medications" | "bills" | "serviceFees",
-  delta: number,
-  recipientId?: string,
-): Promise<{ ok: boolean; reason?: string }> {
-  const rid = recipientId ?? currentRecipientId;
-  const release = await getBudgetMutex(rid).acquire();
+  intent: PaymentIntent,
+  skipApproval = false,
+): Promise<SpendingUpdate> {
+  const release = await getBudgetMutex(currentRecipientId).acquire();
   try {
-    // Reload from disk so this call always sees updates made by other paths
-    const tracker = loadSpending(rid);
-    const policy = loadPolicy(rid);
+    rotateMonthIfNeeded(spendingTracker);
+    const policyCheck = checkSpendingPolicy(intent.amount, intent.category);
 
-    const current = tracker[category];
-    const limit =
-      category === "medications"
-        ? policy.medicationMonthlyBudget
-        : category === "bills"
-          ? policy.billMonthlyBudget
-          : Infinity;
-    const totalSpent =
-      tracker.medications + tracker.bills + tracker.serviceFees;
-    const globalRemaining = roundBudget(policy.monthlyLimit - totalSpent);
-
-    if (roundBudget(current + delta) > limit) {
-      policyBlocksTotal.inc();
-      return {
-        ok: false,
-        reason: `$${delta.toFixed(2)} would exceed ${category} monthly budget ($${limit}; spent $${current.toFixed(2)})`,
+    if (!policyCheck.allowed) {
+      const transaction: Transaction = {
+        id: `tx-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        ...intent,
+        status: "blocked",
       };
-    }
-    if (delta > globalRemaining) {
-      policyBlocksTotal.inc();
-      return {
-        ok: false,
-        reason: `$${delta.toFixed(2)} would exceed overall monthly limit ($${policy.monthlyLimit}; remaining $${globalRemaining.toFixed(2)})`,
-      };
+      spendingTracker.transactions.push(transaction);
+      appendTransaction(transaction);
+      return { ok: false, status: "blocked", policyCheck, transaction };
     }
 
-    tracker[category] = roundBudget(current + delta);
-    saveSpending(tracker);
-    // Keep module-level var in sync for same-process reads
-    spendingTracker = tracker;
+    if (policyCheck.requiresApproval && !skipApproval) {
+      policyBlocksTotal.inc({ reason: "approval_required" });
+      const holdSeconds = currentPolicy.holdTimeSeconds ?? 0;
+      const submittedAt = new Date().toISOString();
+      const transaction: Transaction = {
+        id: `tx-${Date.now()}`,
+        timestamp: submittedAt,
+        ...intent,
+        status: "pending",
+        pendingUntil: new Date(Date.now() + holdSeconds * 1000).toISOString(),
+        submittedAt,
+      };
+      spendingTracker.transactions.push(transaction);
+      agentTransactionsTotal.inc({ status: "pending" });
+      // Append only the new pending transaction — O(1) write (Issue #205)
+      appendTransaction(transaction);
+      return { ok: false, status: "pending", policyCheck, transaction };
+    }
+
+    // Reserve before releasing the mutex so no concurrent call can observe the
+    // pre-payment balance and pass a check it should fail.
+    spendingTracker[intent.category] += intent.amount;
     return { ok: true };
   } finally {
     release();
@@ -1393,14 +1478,14 @@ export async function comparePharmacyPrices(
           pharmacyId: "mock-pharmacy-1",
           price: 4.25,
           distance: "1.0 mi",
-          inStock: "unknown",
+          inStock: true,
         },
         {
           pharmacyName: "MockTown Drugs",
           pharmacyId: "mock-pharmacy-2",
           price: 9.75,
           distance: "2.4 mi",
-          inStock: "unknown",
+          inStock: true,
         },
       ],
       cheapest: {
@@ -1426,7 +1511,12 @@ export async function comparePharmacyPrices(
     return data;
   }
 
-  const response = await getX402Fetch()(url);
+  let response: Response;
+  try {
+    response = await getX402Fetch()(url);
+  } catch (err) {
+    throw upstreamConnectionError(PHARMACY_UPSTREAM, err);
+  }
 
   if (!response.ok) {
     const error = await response.text();
@@ -1594,40 +1684,8 @@ export async function auditBill(lineItemsInput: unknown) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ lineItems }),
     });
-  } catch (err: any) {
-    const baseUrl = BILL_AUDIT_API;
-    const docsHint = "See docs/setup/services.md for local service setup.";
-    const message =
-      typeof err?.message === "string" ? err.message : "Unknown network error";
-    const code = err?.cause?.code || err?.code;
-
-    if (code === "ECONNREFUSED") {
-      throw new Error(
-        `Bill Audit API connection refused (ECONNREFUSED). This is usually a config or startup issue. ` +
-          `Ensure BILL_AUDIT_API_URL points to a running service (currently ${baseUrl}). ${docsHint}`,
-      );
-    }
-
-    if (
-      code === "ETIMEDOUT" ||
-      code === "UND_ERR_CONNECT_TIMEOUT" ||
-      code === "UND_ERR_SOCKET"
-    ) {
-      throw new Error(
-        `Bill Audit API request timed out. This is often transient (network hiccup or cold start). ` +
-          `Try again; if it persists, verify the service at ${baseUrl} is reachable. ${docsHint}`,
-      );
-    }
-
-    if (code === "ENOTFOUND") {
-      throw new Error(
-        `Bill Audit API hostname not found (ENOTFOUND). Check BILL_AUDIT_API_URL (currently ${baseUrl}). ${docsHint}`,
-      );
-    }
-
-    throw new Error(
-      `Bill Audit API unreachable. ${message}. Verify the service is reachable at ${baseUrl}. ${docsHint}`,
-    );
+  } catch (err) {
+    throw upstreamConnectionError(BILL_AUDIT_UPSTREAM, err);
   }
 
   if (!response.ok) {
@@ -1681,7 +1739,7 @@ export async function auditBill(lineItemsInput: unknown) {
   }
 
   recordServiceFee(
-    0.01,
+    fee,
     "x402 query: medical bill audit",
     data.protocol?.payTo || "bill-audit-api",
     txHash,
@@ -1736,11 +1794,16 @@ export async function checkDrugInteractions(medications: string[]) {
     return data;
   }
 
-  const response = await getX402Fetch()(
-    `${DRUG_INTERACTION_API}/drug/interactions?meds=${encodeURIComponent(
-      medications.join(","),
-    )}`,
-  );
+  let response: Response;
+  try {
+    response = await getX402Fetch()(
+      `${DRUG_INTERACTION_API}/drug/interactions?meds=${encodeURIComponent(
+        medications.join(","),
+      )}`,
+    );
+  } catch (err) {
+    throw upstreamConnectionError(DRUG_INTERACTION_UPSTREAM, err);
+  }
 
   if (!response.ok) {
     const error = await response.text();
@@ -2392,91 +2455,56 @@ export async function payForMedication(
     };
   }
   // Atomically check policy and reserve the budget before the async payment
-  // check when only one slot remains in the budget.
-  const release = await getBudgetMutex(currentRecipientId).acquire();
-  let policyCheck: ReturnType<typeof checkSpendingPolicy>;
-  try {
-    rotateMonthIfNeeded(spendingTracker);
-    policyCheck = checkSpendingPolicy(amount, TRANSACTION_CATEGORY.MEDICATIONS);
-    if (!policyCheck.allowed) {
-      const reason = policyCheck.reason!.includes("daily")
-        ? "daily_limit"
-        : policyCheck.reason!.includes("overall monthly limit")
-          ? "monthly_limit"
-          : "budget";
-      policyBlocksTotal.inc({ reason });
-      paymentRejectedTotal.inc({ reason });
-
-      const tx = {
-        id: `tx-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        type: "medication" as const,
-        description: `${drugName} from ${pharmacyName}`,
-        amount,
-        recipient: pharmacyId,
-        status: "blocked" as const,
-        category: TRANSACTION_CATEGORY.MEDICATIONS,
-      };
-      spendingTracker.transactions.push(tx);
-      appendTransaction(tx as any);
-
-      // Surface the full budget context so the LLM can decide whether to ask
-      // the caregiver for an override or pick a cheaper option (Issue #160).
-      const dailyRemaining = policyCheck.dailyRemaining ?? 0;
-      const monthlyRemaining = policyCheck.monthlyRemaining ?? 0;
-      const budgetContext = {
-        reason,
-        attempted: amount,
-        dailyRemaining,
-        monthlyRemaining,
-        suggestion:
-          `Relay this to the caregiver: the $${amount.toFixed(2)} payment was blocked by the spending policy. ` +
-          `Remaining budget is $${dailyRemaining.toFixed(2)} today and $${monthlyRemaining.toFixed(2)} this month for ${TRANSACTION_CATEGORY.MEDICATIONS}. ` +
-          `Ask them to approve a one-time override, or choose a cheaper option that fits the remaining budget.`,
-      };
-
-      return {
-        success: false,
-        error: `BLOCKED BY SPENDING POLICY: ${policyCheck.reason}`,
-        transaction: tx,
-        budgetContext,
-      };
-    }
-    if (policyCheck.requiresApproval && !skipApproval) {
-      policyBlocksTotal.inc({ reason: "approval_required" });
-      const holdSeconds = (currentPolicy as any)?.holdTimeSeconds ?? 0;
-      const submittedAt = new Date().toISOString();
-      const pendingUntil = new Date(
-        Date.now() + holdSeconds * 1000,
-      ).toISOString();
-      const tx: Transaction & { pendingUntil?: string; submittedAt?: string } =
-        {
-          id: `tx-${Date.now()}`,
-          timestamp: submittedAt,
-          type: "medication" as const,
-          description: `${drugName} from ${pharmacyName}`,
-          amount,
-          recipient: pharmacyId,
-          status: "pending" as const,
-          category: TRANSACTION_CATEGORY.MEDICATIONS,
-          pendingUntil,
-          submittedAt,
-        };
-      spendingTracker.transactions.push(tx);
-      agentTransactionsTotal.inc({ status: "pending" });
-      // Append only the new pending transaction — O(1) write (Issue #205)
-      appendTransaction(tx);
+  // (Issues #209, #1060).
+  const reservation = await updateSpending(
+    {
+      type: "medication",
+      category: TRANSACTION_CATEGORY.MEDICATIONS,
+      description: `${drugName} from ${pharmacyName}`,
+      amount,
+      recipient: pharmacyId,
+    },
+    skipApproval,
+  );
+  if (!reservation.ok) {
+    const { policyCheck, transaction } = reservation;
+    if (reservation.status === "pending") {
       return {
         success: false,
         error: `REQUIRES CAREGIVER APPROVAL: ${amount.toFixed(2)} exceeds the ${currentPolicy.approvalThreshold} approval threshold.`,
-        transaction: tx,
+        transaction,
       };
     }
-    // Reserve the budget before releasing the mutex so no other concurrent call
-    // can observe the pre-payment balance and pass a check it should fail.
-    spendingTracker.medications += amount;
-  } finally {
-    release();
+
+    const reason = policyCheck.reason!.includes("daily")
+      ? "daily_limit"
+      : policyCheck.reason!.includes("overall monthly limit")
+        ? "monthly_limit"
+        : "budget";
+    policyBlocksTotal.inc({ reason });
+    paymentRejectedTotal.inc({ reason });
+
+    // Surface the full budget context so the LLM can decide whether to ask
+    // the caregiver for an override or pick a cheaper option (Issue #160).
+    const dailyRemaining = policyCheck.dailyRemaining ?? 0;
+    const monthlyRemaining = policyCheck.monthlyRemaining ?? 0;
+    const budgetContext = {
+      reason,
+      attempted: amount,
+      dailyRemaining,
+      monthlyRemaining,
+      suggestion:
+        `Relay this to the caregiver: the $${amount.toFixed(2)} payment was blocked by the spending policy. ` +
+        `Remaining budget is $${dailyRemaining.toFixed(2)} today and $${monthlyRemaining.toFixed(2)} this month for ${TRANSACTION_CATEGORY.MEDICATIONS}. ` +
+        `Ask them to approve a one-time override, or choose a cheaper option that fits the remaining budget.`,
+    };
+
+    return {
+      success: false,
+      error: `BLOCKED BY SPENDING POLICY: ${policyCheck.reason}`,
+      transaction,
+      budgetContext,
+    };
   }
 
   // Execute real MPP charge payment to pharmacy (outside the mutex — can be slow)
@@ -2565,71 +2593,35 @@ export async function payBill(
     };
   }
   // Atomically check policy and reserve the budget before the async payment
-  // (Issue #209).
-  const releaseBill = await getBudgetMutex(currentRecipientId).acquire();
-  let billPolicyCheck: ReturnType<typeof checkSpendingPolicy>;
-  try {
-    rotateMonthIfNeeded(spendingTracker);
-    billPolicyCheck = checkSpendingPolicy(amount, TRANSACTION_CATEGORY.BILLS);
-    if (!billPolicyCheck.allowed) {
-      const reason = billPolicyCheck.reason!.includes("daily")
-        ? "daily_limit"
-        : "budget";
-      policyBlocksTotal.inc({ reason });
-
-      const tx = {
-        id: `tx-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        type: "bill" as const,
-        description: `${description} — ${providerName}`,
-        amount,
-        recipient: providerId,
-        status: "blocked" as const,
-        category: TRANSACTION_CATEGORY.BILLS,
-      };
-      spendingTracker.transactions.push(tx);
-      appendTransaction(tx as any);
-
-      return {
-        success: false,
-        error: `BLOCKED BY SPENDING POLICY: ${billPolicyCheck.reason}`,
-        transaction: tx,
-      };
-    }
-    if (billPolicyCheck.requiresApproval && !skipApproval) {
-      policyBlocksTotal.inc({ reason: "approval_required" });
-      const holdSeconds = (currentPolicy as any)?.holdTimeSeconds ?? 0;
-      const submittedAt = new Date().toISOString();
-      const pendingUntil = new Date(
-        Date.now() + holdSeconds * 1000,
-      ).toISOString();
-      const tx: Transaction & { pendingUntil?: string; submittedAt?: string } =
-        {
-          id: `tx-${Date.now()}`,
-          timestamp: submittedAt,
-          type: "bill" as const,
-          description: `${description} — ${providerName}`,
-          amount,
-          recipient: providerId,
-          status: "pending" as const,
-          category: TRANSACTION_CATEGORY.BILLS,
-          pendingUntil,
-          submittedAt,
-        };
-      spendingTracker.transactions.push(tx);
-      agentTransactionsTotal.inc({ status: "pending" });
-      // Append only the new pending transaction — O(1) write (Issue #205)
-      appendTransaction(tx);
+  // (Issues #209, #1060).
+  const reservation = await updateSpending(
+    {
+      type: "bill",
+      category: TRANSACTION_CATEGORY.BILLS,
+      description: `${description} — ${providerName}`,
+      amount,
+      recipient: providerId,
+    },
+    skipApproval,
+  );
+  if (!reservation.ok) {
+    const { policyCheck, transaction } = reservation;
+    if (reservation.status === "pending") {
       return {
         success: false,
         error: `REQUIRES CAREGIVER APPROVAL: ${amount.toFixed(2)} exceeds the ${currentPolicy.approvalThreshold} approval threshold.`,
-        transaction: tx,
+        transaction,
       };
     }
-    // Reserve the budget before releasing the mutex.
-    spendingTracker.bills += amount;
-  } finally {
-    releaseBill();
+
+    policyBlocksTotal.inc({
+      reason: policyCheck.reason!.includes("daily") ? "daily_limit" : "budget",
+    });
+    return {
+      success: false,
+      error: `BLOCKED BY SPENDING POLICY: ${policyCheck.reason}`,
+      transaction,
+    };
   }
 
   // Execute real Stellar USDC transfer (serialised per-keypair to avoid sequence races)
@@ -2965,7 +2957,7 @@ export const TOOL_DEFINITIONS = [
   {
     name: "compare_pharmacy_prices",
     description:
-      'Compare medication prices across multiple pharmacies. Pays $0.002 USDC per query via x402 on Stellar. Pass the medication dosage exactly as known; the returned dosage field is reliable and echoed from the request for safety. Returns prices sorted cheapest to most expensive, with potential savings. If the medication is unknown or no prices are found, the tool returns { ok: false, reason: "NO_PRICES_FOUND" } which you should handle gracefully (e.g. notify the caregiver). Each pharmacy has an inStock field: "unknown" means real-time inventory is unavailable (proceed with caution), true means in stock. Never assume a medication is in stock if inStock is "unknown" — confirm with the pharmacy before ordering.',
+      'Compare medication prices across multiple pharmacies. Pays $0.002 USDC per query via x402 on Stellar. Pass the medication dosage exactly as known; the returned dosage field is reliable and echoed from the request for safety. Returns prices sorted cheapest to most expensive, with potential savings. If the medication is unknown or no prices are found, the tool returns { ok: false, reason: "NO_PRICES_FOUND" } which you should handle gracefully (e.g. notify the caregiver). Each pharmacy has an inStock field that is always true: it means the pharmacy lists the medication in its price catalog, not that real-time inventory was checked.',
     input_schema: strictInputSchema({
       type: "object" as const,
       properties: {
