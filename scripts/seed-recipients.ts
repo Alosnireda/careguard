@@ -88,7 +88,6 @@ function main() {
       medications,
       primary_doctor: doctor,
       insurance,
-      caregiver_user_id: null,
     });
 
     logger.info(`  [${recipient.id}] ${recipient.name} (age ${recipient.age}) — ${recipient.medications.length} medications`);

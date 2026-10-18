@@ -42,6 +42,7 @@ import {
   setCurrentRecipient,
   checkRecipientAllergies,
   runPriceWatch,
+  getHandoffNotes,
   TOOL_DEFINITIONS,
   validateToolInput,
 } from "./tools.ts";
@@ -122,6 +123,7 @@ IMPORTANT RULES:
   DISALLOWED: Do not add, extrapolate, or fabricate any line item, amount, or CPT code that was not in the tool output.
 - Report the total savings found and the cost of the agent's API queries
 - After paying for medication, schedule an adherence reminder
+- Before answering questions about the care recipient's recent care (doses, symptoms, how they are doing), call get_handoff_notes and take the latest caregiver handoff notes into account
 - When audit errors are found, offer to generate a dispute letter via generate_dispute_letter
 - If a tool result is truncated and includes resultId or a summary, call fetch_tool_result to page through the remaining data before making conclusions
 
@@ -267,6 +269,12 @@ export async function executeTool(name: string, input: Record<string, unknown>):
         break;
       case "confirm_adherence":
         result = confirmAdherenceReminder(input.record_id as string);
+        break;
+      case "get_handoff_notes":
+        result = getHandoffNotes(
+          input.recipient_id as string | undefined,
+          input.limit as number | undefined,
+        );
         break;
       default:
         result = { error: `Unknown tool: ${name}` };

@@ -20,6 +20,7 @@
     "policy": "Policy",
     "wallet": "Wallet",
     "activity": "Activity",
+    "notes": "Notes",
     "settings": "Settings"
   },
   "overview": {
@@ -194,5 +195,37 @@
     "trendAria": "trend",
     "readings": "readings",
     "adherenceEvents": "adherence events"
+  },
+  "notes": {
+    "title": "Shift handoff notes",
+    "description": "Leave context for the next caregiver on shift. The agent reads the latest notes before answering care questions.",
+    "label": "New note",
+    "placeholder": "e.g. Gave the 2pm dose late, watch for nausea.",
+    "submit": "Post note",
+    "empty": "No handoff notes yet.",
+    "required": "Write a note before posting.",
+    "saveFailed": "Couldn't post the note — try again.",
+    "loadFailed": "Couldn't load handoff notes.",
+    "forbidden": "Your role can read notes but not post them.",
+    "charactersLeft": "characters left"
+  },
+  "caregivers": {
+    "title": "Linked caregivers",
+    "description": "Everyone who shares care for this recipient and what they are allowed to do.",
+    "empty": "No caregivers linked yet.",
+    "loadFailed": "Couldn't load linked caregivers.",
+    "pending": "Invite pending",
+    "roleOwner": "Owner",
+    "roleCoCaregiver": "Co-caregiver",
+    "roleViewer": "Viewer",
+    "inviteTitle": "Invite a caregiver",
+    "email": "Email",
+    "role": "Role",
+    "invite": "Send invite",
+    "invalidEmail": "Enter a valid email address.",
+    "inviteFailed": "Couldn't send the invite — try again.",
+    "inviteForbidden": "Only owners can invite caregivers.",
+    "alreadyLinked": "That caregiver is already linked to this recipient.",
+    "inviteCode": "Invite code for {email} (shown once — share it with them):"
   }
 }

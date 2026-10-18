@@ -20,6 +20,7 @@
     "policy": "Política",
     "wallet": "Billetera",
     "activity": "Actividad",
+    "notes": "Notas",
     "settings": "Ajustes"
   },
   "overview": {
@@ -194,5 +195,37 @@
     "trendAria": "tendencia",
     "readings": "lecturas",
     "adherenceEvents": "eventos de adherencia"
+  },
+  "notes": {
+    "title": "Notas de cambio de turno",
+    "description": "Deja contexto para el siguiente cuidador de turno. El agente lee las notas más recientes antes de responder preguntas de cuidado.",
+    "label": "Nueva nota",
+    "placeholder": "p. ej. Di la dosis de las 2pm tarde, vigilar náuseas.",
+    "submit": "Publicar nota",
+    "empty": "Aún no hay notas de cambio de turno.",
+    "required": "Escribe una nota antes de publicar.",
+    "saveFailed": "No se pudo publicar la nota — inténtalo de nuevo.",
+    "loadFailed": "No se pudieron cargar las notas.",
+    "forbidden": "Tu rol puede leer notas pero no publicarlas.",
+    "charactersLeft": "caracteres restantes"
+  },
+  "caregivers": {
+    "title": "Cuidadores vinculados",
+    "description": "Todas las personas que comparten el cuidado de este paciente y lo que pueden hacer.",
+    "empty": "Aún no hay cuidadores vinculados.",
+    "loadFailed": "No se pudieron cargar los cuidadores vinculados.",
+    "pending": "Invitación pendiente",
+    "roleOwner": "Propietario",
+    "roleCoCaregiver": "Co-cuidador",
+    "roleViewer": "Observador",
+    "inviteTitle": "Invitar a un cuidador",
+    "email": "Correo electrónico",
+    "role": "Rol",
+    "invite": "Enviar invitación",
+    "invalidEmail": "Introduce un correo electrónico válido.",
+    "inviteFailed": "No se pudo enviar la invitación — inténtalo de nuevo.",
+    "inviteForbidden": "Solo los propietarios pueden invitar cuidadores.",
+    "alreadyLinked": "Ese cuidador ya está vinculado a este paciente.",
+    "inviteCode": "Código de invitación para {email} (se muestra una vez — compártelo):"
   }
 }

@@ -62,7 +62,6 @@ function runBenchmark1319(iterations = 1000) {
         medications: ["Lisinopril 10mg", "Metformin 500mg", "Atorvastatin 20mg", "Amlodipine 5mg"].slice(0, (i % 4) + 1),
         primary_doctor: `Dr. Specialist ${i}, Metro Hospital`,
         insurance: i % 2 === 0 ? "Medicare Part D" : "BlueCross BlueShield Senior",
-        caregiver_user_id: `user_${i}`,
       });
     }
 

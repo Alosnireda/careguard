@@ -83,7 +83,6 @@ import {
   getAdherenceSummary,
   confirmAdherence,
 } from "../shared/adherence.ts";
-import { Journal } from "./journal.ts";
 import {
   x402SettlementsTotal,
   paymentsUsdcTotal,
@@ -118,6 +117,15 @@ import {
   extractLineItemsFromBillImage,
   type OcrExtractionResult,
 } from "../shared/bill-ocr.ts";
+import { redactPII } from "../shared/redact.ts";
+import {
+  DEFAULT_RECIPIENT_ID,
+  getCareRecipientsStore,
+} from "../services/care-recipients/db.ts";
+import {
+  HANDOFF_NOTES_TOOL_DEFAULT,
+  HANDOFF_NOTES_TOOL_MAX,
+} from "./tool-input-validation.ts";
 
 assertMockNetworkAllowed();
 
@@ -1340,12 +1348,9 @@ export function resetSpendingTracker(recipientId?: string) {
     spendingTracker.medications +
     spendingTracker.bills +
     spendingTracker.serviceFees;
-  spendingTracker = {
-    medications: 0,
-    bills: 0,
-    serviceFees: 0,
-    transactions: [],
-  };
+  // #1069: reuse the single empty-tracker builder so monthTotals is present
+  // immediately after a reset instead of waiting for rotateMonthIfNeeded.
+  spendingTracker = createEmptySpendingTracker();
   saveSpending(spendingTracker);
   appendAuditEntry({
     event: "spending.reset",
@@ -3283,7 +3288,50 @@ export const TOOL_DEFINITIONS = [
       required: [] as string[],
     }),
   },
+  {
+    name: "get_handoff_notes",
+    description:
+      "Read the latest shift handoff notes co-caregivers left for a care recipient, newest first. Call this before answering questions about the recipient's recent care, doses, or symptoms.",
+    input_schema: strictInputSchema({
+      type: "object" as const,
+      properties: {
+        recipient_id: {
+          type: "string",
+          description: `Care recipient registry ID (default: ${DEFAULT_RECIPIENT_ID})`,
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: HANDOFF_NOTES_TOOL_MAX,
+          description: `Number of most recent notes to return (default: ${HANDOFF_NOTES_TOOL_DEFAULT})`,
+        },
+      },
+      required: [] as string[],
+    }),
+  },
 ];
+
+// ── Shift Handoff Notes (#1180) ───────────────────────────────────────────────
+
+/**
+ * Latest handoff notes for a recipient. Notes are caregiver free text, so
+ * names and drug-plus-dose mentions are redacted with redactPII before they
+ * reach the LLM, unless PHI scrubbing is disabled (LLM_PII_SCRUB=false).
+ */
+export function getHandoffNotes(
+  recipientId: string = DEFAULT_RECIPIENT_ID,
+  limit: number = HANDOFF_NOTES_TOOL_DEFAULT,
+) {
+  const scrub = process.env.LLM_PII_SCRUB !== "false";
+  const notes = getCareRecipientsStore()
+    .listHandoffNotes(recipientId, limit)
+    .map((note) => ({
+      author: scrub ? redactPII(note.author) : note.author,
+      text: scrub ? redactPII(note.text) : note.text,
+      createdAt: note.created_at,
+    }));
+  return { recipientId, count: notes.length, notes };
+}
 
 // ── Exported Allergy, Price-Watch & OCR Tools ─────────────────────────────────
 

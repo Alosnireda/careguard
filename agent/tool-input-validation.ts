@@ -12,6 +12,10 @@ import { z } from "zod";
 const recipientIdSchema = z.string().min(1).optional();
 const amountSchema = z.union([z.number(), z.string()]);
 
+/** get_handoff_notes page size (#1180). */
+export const HANDOFF_NOTES_TOOL_DEFAULT = 3;
+export const HANDOFF_NOTES_TOOL_MAX = 10;
+
 export const TOOL_INPUT_SCHEMAS = {
   compare_pharmacy_prices: z
     .object({
@@ -98,6 +102,12 @@ export const TOOL_INPUT_SCHEMAS = {
   confirm_adherence: z
     .object({
       record_id: z.string().min(1),
+    })
+    .strict(),
+  get_handoff_notes: z
+    .object({
+      recipient_id: recipientIdSchema,
+      limit: z.number().int().min(1).max(HANDOFF_NOTES_TOOL_MAX).optional(),
     })
     .strict(),
 } as const;

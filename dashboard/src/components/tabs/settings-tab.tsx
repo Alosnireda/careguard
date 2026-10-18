@@ -12,6 +12,7 @@ import { NETWORK_LABEL } from "../../lib/stellar-network";
 import { getTranslations, type Locale } from "../../i18n";
 import { AGENT_URL } from "../../lib/agent-url";
 import { agentFetch } from "../../lib/agent-fetch";
+import { LinkedCaregiversSection } from "../linked-caregivers-section";
 
 export interface RecipientOption {
   id: string;
@@ -566,6 +567,10 @@ export function SettingsTab({
           </table>
         </div>
       </div>
+
+      {selectedRecipientId && (
+        <LinkedCaregiversSection recipientId={selectedRecipientId} locale={locale} />
+      )}
 
       <div className="bg-white rounded-xl border border-slate-200 p-6">
         <h2 className="text-sm font-semibold text-slate-700 mb-4">{t.settings.caregiver}</h2>

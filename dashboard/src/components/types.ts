@@ -55,6 +55,7 @@ export const DASHBOARD_TABS = [
   "policy",
   "wallet",
   "activity",
+  "notes",
   "settings",
 ] as const;
 

@@ -107,7 +107,7 @@ import {
   getPharmacyPrices,
   getAvailableDrugs,
 } from "./shared/pharmacy-pricing.ts";
-import { createCareRecipientsStore } from "./services/care-recipients/db.ts";
+import { getCareRecipientsStore } from "./services/care-recipients/db.ts";
 import { createCareRecipientsRouter } from "./services/care-recipients/routes.ts";
 import { createVitalsStore } from "./services/vitals/db.ts";
 import { createVitalsRouter } from "./services/vitals/routes.ts";
@@ -438,7 +438,8 @@ app.patch("/agent/profile", (req, res) => {
 const PHARMACY_ADMIN_TOKEN =
   process.env.PHARMACY_ADMIN_TOKEN || CAREGIVER_TOKEN;
 const pharmacyStore = createPharmacyPricingStore();
-const recipientsStore = createCareRecipientsStore();
+// Shared with the agent's get_handoff_notes tool (#1180).
+const recipientsStore = getCareRecipientsStore();
 
 // Register default names and database names on server startup
 registerKnownNames([_profileData.recipient.name, _profileData.caregiver.name]);

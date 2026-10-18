@@ -35,6 +35,11 @@ source; add one only if the implementation becomes a remote provider.
 
 ## #1327 — journal scaling
 
+> **Update (#1068):** `agent/journal.ts` had no production callers and has been
+> removed, together with its benchmark. Spending persistence uses the snapshot +
+> `transactions.jsonl` path in `agent/tools.ts`. The findings below are kept as a
+> historical record.
+
 `agent/journal.ts` uses synchronous filesystem operations and JSONL storage.
 Appends are `appendFileSync` calls. Reads replay the whole journal by reading,
 splitting, parsing, and applying every line. Compaction is configured by the

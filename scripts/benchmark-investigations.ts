@@ -1,16 +1,15 @@
 #!/usr/bin/env tsx
 
-/** Reproducible measurements for issues #1323, #1325, and #1327. */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+/**
+ * Reproducible measurements for issues #1323 and #1325. The #1327 journal
+ * benchmark was removed with agent/journal.ts (#1068), which had no
+ * production callers.
+ */
 import { performance } from "node:perf_hooks";
 import { isMockNetwork } from "../shared/network-mode.ts";
 import { getPharmacyPrices } from "../shared/pharmacy-pricing.ts";
-import { Journal } from "../agent/journal.ts";
 
 const iterations = Number(process.env.BENCHMARK_ITERATIONS ?? 100_000);
-const journalSizes = [1_000, 10_000, 100_000];
 
 function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
@@ -42,13 +41,4 @@ function benchmarkPricing() {
   return { cold, warm, mixed, cache: { configured: false, ttlMs: null, hitRate: 0 } };
 }
 
-function benchmarkJournal(size: number) {
-  const directory = mkdtempSync(join(tmpdir(), "careguard-journal-benchmark-"));
-  const journal = new Journal({ journalPath: join(directory, "journal.jsonl"), snapshotPath: join(directory, "snapshot.json"), compactionThreshold: size + 1 });
-  const append = measure(() => journal.append("update", { value: 1 }), size);
-  const replay = measure(() => journal.replay({ count: 0 }, { update: (state, data) => ({ count: state.count + (data as { value: number }).value }) }), 1);
-  rmSync(directory, { recursive: true, force: true });
-  return { entries: size, append, replay };
-}
-
-console.log(JSON.stringify({ generatedAt: new Date().toISOString(), networkMode: benchmarkNetworkMode(), pharmacyPricing: benchmarkPricing(), journal: journalSizes.map(benchmarkJournal) }, null, 2));
+console.log(JSON.stringify({ generatedAt: new Date().toISOString(), networkMode: benchmarkNetworkMode(), pharmacyPricing: benchmarkPricing() }, null, 2));
