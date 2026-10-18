@@ -7,34 +7,7 @@ import { logger } from '../../shared/logger.ts';
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
 
-/** Id of the recipient seeded into an empty database. */
-export const DEFAULT_RECIPIENT_ID = 'rosa_garcia';
-
-/** Caregiver roles (#1179), most to least privileged. */
-export const CAREGIVER_ROLES = ['owner', 'co-caregiver', 'viewer'] as const;
-export type CaregiverRole = (typeof CAREGIVER_ROLES)[number];
-
-/**
- * - view:   read the recipient, its linked caregivers and handoff notes
- * - act:    day-to-day care actions, e.g. posting handoff notes
- * - manage: invite and remove caregivers
- */
-export type CaregiverPermission = 'view' | 'act' | 'manage';
-
-const ROLE_PERMISSIONS: Record<CaregiverRole, ReadonlySet<CaregiverPermission>> = {
-  owner: new Set(['view', 'act', 'manage']),
-  'co-caregiver': new Set(['view', 'act']),
-  viewer: new Set(['view']),
-};
-
-export function roleHasPermission(role: CaregiverRole, permission: CaregiverPermission): boolean {
-  return ROLE_PERMISSIONS[role].has(permission);
-}
-
-export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-export const HANDOFF_NOTE_MAX_LENGTH = 500;
-
-export interface CareRecipientEntity {
+export interface CareRecipientRecord {
   id: string;
   name: string;
   age: number | null;
@@ -43,7 +16,8 @@ export interface CareRecipientEntity {
   insurance: string | null;
 }
 
-export type CareRecipientInput = Omit<CareRecipientEntity, 'id'>;
+/** Backward-compatibility alias for CareRecipientRecord (Issue #1067) */
+export type CareRecipientEntity = CareRecipientRecord;
 
 interface CareRecipientRow {
   id: string;
@@ -117,6 +91,34 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
+/**
+ * Temporary approval delegation (#1195): `delegator` (the primary caregiver)
+ * lets `delegate` (a co-caregiver) approve/deny pending transactions for one
+ * recipient between `starts_at` and `ends_at`. A delegation is active only
+ * inside that window and while `revoked_at` is null, so it expires on its own
+ * at `ends_at` with no background job.
+ */
+export interface ApprovalDelegation {
+  id: string;
+  recipient_id: string;
+  delegator: string;
+  delegate: string;
+  starts_at: string;
+  ends_at: string;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export type DelegationStatus = 'scheduled' | 'active' | 'expired' | 'revoked';
+
+export function delegationStatus(d: ApprovalDelegation, now: Date = new Date()): DelegationStatus {
+  if (d.revoked_at) return 'revoked';
+  const t = now.getTime();
+  if (t < Date.parse(d.starts_at)) return 'scheduled';
+  if (t >= Date.parse(d.ends_at)) return 'expired';
+  return 'active';
+}
+
 function defaultDbPath(): string {
   if (process.env.CARE_RECIPIENTS_DB_PATH) {
     return path.resolve(process.cwd(), process.env.CARE_RECIPIENTS_DB_PATH);
@@ -186,32 +188,20 @@ export class CareRecipientsStore {
         primary_doctor TEXT,
         insurance TEXT
       );
-
-      CREATE TABLE IF NOT EXISTS care_recipient_caregivers (
-        recipient_id TEXT NOT NULL REFERENCES care_recipients(id) ON DELETE CASCADE,
-        caregiver_user_id TEXT NOT NULL,
-        email TEXT,
-        display_name TEXT,
-        role TEXT NOT NULL CHECK (role IN (${roles})),
-        status TEXT NOT NULL CHECK (status IN ('active', 'invited')),
-        invite_token_hash TEXT UNIQUE,
-        invite_expires_at TEXT,
-        access_token_hash TEXT UNIQUE,
-        invited_by TEXT,
-        created_at TEXT NOT NULL,
-        accepted_at TEXT,
-        PRIMARY KEY (recipient_id, caregiver_user_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS handoff_notes (
+      CREATE TABLE IF NOT EXISTS approval_delegations (
         id TEXT PRIMARY KEY,
-        recipient_id TEXT NOT NULL REFERENCES care_recipients(id) ON DELETE CASCADE,
-        author TEXT NOT NULL,
-        text TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        recipient_id TEXT NOT NULL,
+        delegator TEXT NOT NULL,
+        delegate TEXT NOT NULL,
+        starts_at TEXT NOT NULL,
+        ends_at TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL,
+        CHECK (delegator <> delegate),
+        CHECK (ends_at > starts_at)
       );
-      CREATE INDEX IF NOT EXISTS handoff_notes_recipient_time
-        ON handoff_notes (recipient_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_approval_delegations_lookup
+        ON approval_delegations (recipient_id, delegate, ends_at);
     `);
     this.migrateLegacyCaregiverColumn();
   }
@@ -297,168 +287,62 @@ export class CareRecipientsStore {
     return this.getById(id)!;
   }
 
-  // ── Caregiver links (#1179) ─────────────────────────────────────────────────
+  // ── Approval delegations (#1195) ──────────────────────────────────────────
 
-  /** Active caregivers and pending invites for a recipient, oldest first. */
-  listCaregivers(recipientId: string): RecipientCaregiver[] {
-    return this.db
-      .prepare(`SELECT ${CAREGIVER_COLUMNS} FROM care_recipient_caregivers WHERE recipient_id = ? ORDER BY created_at ASC`)
-      .all(recipientId) as RecipientCaregiver[];
-  }
-
-  private getCaregiver(recipientId: string, caregiverUserId: string): RecipientCaregiver | undefined {
-    return this.db
-      .prepare(`SELECT ${CAREGIVER_COLUMNS} FROM care_recipient_caregivers WHERE recipient_id = ? AND caregiver_user_id = ?`)
-      .get(recipientId, caregiverUserId) as RecipientCaregiver | undefined;
-  }
-
-  /**
-   * Invites a caregiver by email. Re-inviting a pending address rotates its
-   * code and role; inviting an already active caregiver is rejected. Only the
-   * SHA-256 of the invite code is stored, so the returned code is the one
-   * chance to deliver it.
-   */
-  inviteCaregiver(input: {
-    recipientId: string;
-    email: string;
-    role: CaregiverRole;
-    invitedBy: string;
-  }): { caregiver: RecipientCaregiver; inviteToken: string } {
-    const email = normalizeEmail(input.email);
-    const inviteToken = generateSecret();
-    const now = Date.now();
-    return this.transaction(() => {
-      if (!this.getById(input.recipientId)) {
-        throw new CaregiverAccessError('recipient_not_found', 'Care recipient not found');
-      }
-      const result = this.db.prepare(`
-        INSERT INTO care_recipient_caregivers
-          (recipient_id, caregiver_user_id, email, role, status, invite_token_hash, invite_expires_at, invited_by, created_at)
-        VALUES (?, ?, ?, ?, 'invited', ?, ?, ?, ?)
-        ON CONFLICT (recipient_id, caregiver_user_id) DO UPDATE SET
-          role = excluded.role,
-          invite_token_hash = excluded.invite_token_hash,
-          invite_expires_at = excluded.invite_expires_at,
-          invited_by = excluded.invited_by
-        WHERE care_recipient_caregivers.status = 'invited'
-      `).run(
-        input.recipientId,
-        email,
-        email,
-        input.role,
-        hashSecret(inviteToken),
-        new Date(now + INVITE_TTL_MS).toISOString(),
-        input.invitedBy,
-        new Date(now).toISOString(),
-      );
-      if (Number(result.changes) === 0) {
-        throw new CaregiverAccessError('already_linked', 'Caregiver is already linked to this care recipient');
-      }
-      return { caregiver: this.getCaregiver(input.recipientId, email)!, inviteToken };
-    });
-  }
-
-  /**
-   * Redeems an invite code and issues an access token for that one recipient
-   * link. Tokens are scoped to a link rather than to the email address because
-   * the email is asserted by the inviter: a global identity would let an owner
-   * of one recipient invite someone else's address, accept it and reach that
-   * person's other recipients.
-   */
-  acceptInvite(inviteToken: string, displayName?: string): { caregiver: RecipientCaregiver; accessToken: string } {
-    return this.transaction(() => {
-      const invite = this.db
-        .prepare(`SELECT ${CAREGIVER_COLUMNS} FROM care_recipient_caregivers WHERE invite_token_hash = ? AND status = 'invited'`)
-        .get(hashSecret(inviteToken)) as RecipientCaregiver | undefined;
-      if (!invite) {
-        throw new CaregiverAccessError('invite_invalid', 'Invite code is invalid or has already been used');
-      }
-      if (!invite.invite_expires_at || Date.parse(invite.invite_expires_at) <= Date.now()) {
-        throw new CaregiverAccessError('invite_expired', 'Invite code has expired; ask an owner to re-send it');
-      }
-
-      const accessToken = generateSecret();
-      const acceptedAt = new Date().toISOString();
-      this.db.prepare(`
-        UPDATE care_recipient_caregivers
-        SET status = 'active', display_name = ?, access_token_hash = ?, accepted_at = ?,
-            invite_token_hash = NULL, invite_expires_at = NULL
-        WHERE recipient_id = ? AND caregiver_user_id = ?
-      `).run(displayName ?? null, hashSecret(accessToken), acceptedAt, invite.recipient_id, invite.caregiver_user_id);
-
-      return {
-        caregiver: {
-          ...invite,
-          status: 'active',
-          display_name: displayName ?? null,
-          accepted_at: acceptedAt,
-          invite_expires_at: null,
-        },
-        accessToken,
-      };
-    });
-  }
-
-  /** Resolves an access token to its active caregiver link (indexed lookup). */
-  authenticateCaregiver(accessToken: string): RecipientCaregiver | undefined {
-    return this.db
-      .prepare(`SELECT ${CAREGIVER_COLUMNS} FROM care_recipient_caregivers WHERE access_token_hash = ? AND status = 'active'`)
-      .get(hashSecret(accessToken)) as RecipientCaregiver | undefined;
-  }
-
-  /**
-   * Removes a caregiver link or revokes a pending invite; the link's access
-   * token stops working immediately. The last active owner cannot be removed,
-   * so a recipient is never left without someone able to manage access.
-   */
-  removeCaregiver(recipientId: string, caregiverUserId: string): boolean {
-    return this.transaction(() => {
-      const link = this.getCaregiver(recipientId, caregiverUserId);
-      if (!link) return false;
-      if (link.role === 'owner' && link.status === 'active') {
-        const { count } = this.db
-          .prepare(`SELECT COUNT(*) AS count FROM care_recipient_caregivers WHERE recipient_id = ? AND role = 'owner' AND status = 'active'`)
-          .get(recipientId) as { count: number };
-        if (count <= 1) {
-          throw new CaregiverAccessError('last_owner', 'Cannot remove the last owner of a care recipient');
-        }
-      }
-      this.db
-        .prepare('DELETE FROM care_recipient_caregivers WHERE recipient_id = ? AND caregiver_user_id = ?')
-        .run(recipientId, caregiverUserId);
-      return true;
-    });
-  }
-
-  // ── Shift handoff notes (#1180) ─────────────────────────────────────────────
-
-  addHandoffNote(input: HandoffNoteInput): HandoffNote {
-    const note: HandoffNote = {
-      id: `note_${Date.now()}_${randomUUID().slice(0, 8)}`,
-      ...input,
-      created_at: new Date().toISOString(),
-    };
+  createDelegation(input: {
+    recipient_id: string;
+    delegator: string;
+    delegate: string;
+    starts_at: string;
+    ends_at: string;
+  }): ApprovalDelegation {
+    const id = `dlg_${randomUUID()}`;
     this.db.prepare(`
-      INSERT INTO handoff_notes (id, recipient_id, author, text, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(note.id, note.recipient_id, note.author, note.text, note.created_at);
-    return note;
+      INSERT INTO approval_delegations (id, recipient_id, delegator, delegate, starts_at, ends_at, revoked_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+    `).run(id, input.recipient_id, input.delegator, input.delegate, input.starts_at, input.ends_at, new Date().toISOString());
+    return this.getDelegation(id)!;
   }
 
-  /**
-   * Newest notes first. Served by the (recipient_id, created_at) index, so the
-   * cost is O(log n + limit) regardless of how many notes a recipient has;
-   * rowid breaks ties between notes written in the same millisecond.
-   */
-  listHandoffNotes(recipientId: string, limit: number): HandoffNote[] {
+  getDelegation(id: string): ApprovalDelegation | undefined {
+    return this.db.prepare('SELECT * FROM approval_delegations WHERE id = ?').get(id) as ApprovalDelegation | undefined;
+  }
+
+  listDelegations(recipientId: string): ApprovalDelegation[] {
     return this.db
-      .prepare(`
-        SELECT id, recipient_id, author, text, created_at FROM handoff_notes
-        WHERE recipient_id = ?
-        ORDER BY created_at DESC, rowid DESC
-        LIMIT ?
-      `)
-      .all(recipientId, limit) as HandoffNote[];
+      .prepare('SELECT * FROM approval_delegations WHERE recipient_id = ? ORDER BY starts_at DESC')
+      .all(recipientId) as ApprovalDelegation[];
+  }
+
+  /** The delegation letting `delegate` act for `delegator` on this recipient right now, if any. */
+  findActiveDelegation(recipientId: string, delegator: string, delegate: string, now: Date = new Date()): ApprovalDelegation | undefined {
+    const iso = now.toISOString();
+    return this.db.prepare(`
+      SELECT * FROM approval_delegations
+      WHERE recipient_id = ? AND delegator = ? AND delegate = ?
+        AND revoked_at IS NULL AND starts_at <= ? AND ends_at > ?
+      ORDER BY ends_at DESC LIMIT 1
+    `).get(recipientId, delegator, delegate, iso, iso) as ApprovalDelegation | undefined;
+  }
+
+  /** Active delegations held by `delegate` on this recipient (for the approvals banner). */
+  listActiveDelegationsFor(recipientId: string, delegate: string, now: Date = new Date()): ApprovalDelegation[] {
+    const iso = now.toISOString();
+    return this.db.prepare(`
+      SELECT * FROM approval_delegations
+      WHERE recipient_id = ? AND delegate = ?
+        AND revoked_at IS NULL AND starts_at <= ? AND ends_at > ?
+      ORDER BY ends_at ASC
+    `).all(recipientId, delegate, iso, iso) as ApprovalDelegation[];
+  }
+
+  /** Revoke early. Only the delegator may revoke; returns the updated row or undefined if not theirs/already ended. */
+  revokeDelegation(id: string, delegator: string, now: Date = new Date()): ApprovalDelegation | undefined {
+    const result = this.db.prepare(`
+      UPDATE approval_delegations SET revoked_at = ?
+      WHERE id = ? AND delegator = ? AND revoked_at IS NULL AND ends_at > ?
+    `).run(now.toISOString(), id, delegator, now.toISOString());
+    return result.changes > 0 ? this.getDelegation(id) : undefined;
   }
 }
 

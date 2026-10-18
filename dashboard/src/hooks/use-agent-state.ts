@@ -133,13 +133,22 @@ export function useAgentState({ activeTab }: UseAgentStateOptions) {
     return () => clearInterval(interval);
   }, [fetchApprovals]);
 
-  const updateApproval = useCallback(async (txId: string, approve: boolean) => {
+  const updateApproval = useCallback(async (
+    txId: string,
+    approve: boolean,
+    actor?: { caregiverId: string; onBehalfOf: string },
+  ) => {
     setApprovalsLoading(true);
     try {
       const res = await agentFetch(`${AGENT_URL}/agent/approvals/${txId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ approve }),
+        // #1195: when acting under a delegation, say who is acting and for whom.
+        body: JSON.stringify(
+          actor
+            ? { approve, caregiver_id: actor.caregiverId, on_behalf_of: actor.onBehalfOf }
+            : { approve },
+        ),
       });
       if (res.ok) await fetchApprovals();
     } finally {
@@ -148,11 +157,11 @@ export function useAgentState({ activeTab }: UseAgentStateOptions) {
   }, [fetchApprovals]);
 
   const approveTransaction = useCallback(
-    (txId: string) => updateApproval(txId, true),
+    (txId: string, actor?: { caregiverId: string; onBehalfOf: string }) => updateApproval(txId, true, actor),
     [updateApproval],
   );
   const cancelTransaction = useCallback(
-    (txId: string) => updateApproval(txId, false),
+    (txId: string, actor?: { caregiverId: string; onBehalfOf: string }) => updateApproval(txId, false, actor),
     [updateApproval],
   );
 

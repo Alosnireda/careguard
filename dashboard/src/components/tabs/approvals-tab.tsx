@@ -7,12 +7,25 @@ import { AGENT_URL } from "../../lib/agent-url";
 import { agentFetch } from "../../lib/agent-fetch";
 import type { ItemPresenceMap } from "../../lib/types";
 
+/** Who is deciding, and whose authority they use when delegated (#1195). */
+export interface ApprovalActor {
+  caregiverId: string;
+  onBehalfOf: string;
+}
+
+/** Active delegation held by the current caregiver, as returned by GET /agent/delegations. */
+interface ActiveDelegation {
+  id: string;
+  delegator: string;
+  ends_at: string;
+}
+
 export interface ApprovalsTabProps {
   agentConnected: boolean;
   approvals: Transaction[];
   loading: boolean;
-  onApprove: (txId: string) => Promise<void>;
-  onCancel: (txId: string) => Promise<void>;
+  onApprove: (txId: string, actor?: ApprovalActor) => Promise<void>;
+  onCancel: (txId: string, actor?: ApprovalActor) => Promise<void>;
   locale?: Locale;
   currentCaregiver?: CaregiverProfile;
   linkedCaregivers?: CaregiverProfile[];
@@ -43,7 +56,40 @@ export function ApprovalsTab({
 }: ApprovalsTabProps) {
   const [, setTick] = useState(0);
   const [presenceMap, setPresenceMap] = useState<ItemPresenceMap>({});
+  const [delegation, setDelegation] = useState<ActiveDelegation | null>(null);
   const t = getTranslations(locale);
+  const caregiverId = currentCaregiver.name.toLowerCase().replace(/\s+/g, "-");
+
+  // Delegated approval authority held by this caregiver (#1195). Re-checked
+  // every minute so the banner disappears when the window ends or is revoked.
+  useEffect(() => {
+    if (!agentConnected) return;
+    let cancelled = false;
+    async function fetchDelegation() {
+      try {
+        const res = await agentFetch(
+          `${AGENT_URL}/agent/delegations?recipient_id=rosa&delegate=${encodeURIComponent(caregiverId)}`,
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setDelegation(data.delegations?.[0] ?? null);
+      } catch {
+        // Non-blocking: without it the caregiver simply acts as themselves.
+      }
+    }
+    fetchDelegation();
+    const timer = setInterval(fetchDelegation, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [agentConnected, caregiverId]);
+
+  const activeDelegation =
+    delegation && Date.parse(delegation.ends_at) > Date.now() ? delegation : null;
+  const actor: ApprovalActor | undefined = activeDelegation
+    ? { caregiverId, onBehalfOf: activeDelegation.delegator }
+    : undefined;
 
   useEffect(() => {
     const timer = setInterval(() => setTick((s) => s + 1), 1000);
@@ -61,7 +107,7 @@ export function ApprovalsTab({
             body: JSON.stringify({
               itemId: tx.id,
               itemType: "approval",
-              caregiverId: currentCaregiver.name.toLowerCase().replace(/\s+/g, "-"),
+              caregiverId,
               caregiverName: currentCaregiver.name,
               recipientId: "rosa",
             }),
@@ -111,6 +157,18 @@ export function ApprovalsTab({
             </span>
           )}
         </div>
+
+        {activeDelegation && (
+          <div
+            role="status"
+            className="mb-4 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-900"
+          >
+            <span className="font-semibold">Delegated approval:</span> you&apos;re acting on behalf of{" "}
+            <span className="font-medium">{activeDelegation.delegator}</span> until{" "}
+            {formatDateTime(new Date(activeDelegation.ends_at), locale)}. Your decisions are recorded
+            as delegated in the audit log.
+          </div>
+        )}
 
         {!agentConnected && (
           <p className="text-xs text-slate-500">Agent not connected.</p>
@@ -209,14 +267,14 @@ export function ApprovalsTab({
                     </div>
                     <div className="flex gap-2">
                       <button
-                        onClick={() => onApprove(tx.id)}
+                        onClick={() => (actor ? onApprove(tx.id, actor) : onApprove(tx.id))}
                         disabled={loading}
                         className="px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 cursor-pointer"
                       >
                         Approve
                       </button>
                       <button
-                        onClick={() => onCancel(tx.id)}
+                        onClick={() => (actor ? onCancel(tx.id, actor) : onCancel(tx.id))}
                         disabled={loading}
                         className="px-3 py-1.5 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 cursor-pointer"
                       >
